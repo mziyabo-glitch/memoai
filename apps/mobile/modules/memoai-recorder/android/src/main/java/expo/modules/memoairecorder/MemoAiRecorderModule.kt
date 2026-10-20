@@ -1,6 +1,7 @@
 package expo.modules.memoairecorder
 
 import android.app.ActivityManager
+import android.content.Context
 import android.content.Intent
 import android.os.SystemClock
 import androidx.core.content.ContextCompat
@@ -61,14 +62,23 @@ class MemoAiRecorderModule : Module() {
         throw RecorderException("A recording is already in progress")
       }
       val sessionId = UUID.randomUUID().toString()
-      RecorderController.prepareForCommand()
+      val op = RecorderController.openOperation()
       val intent = Intent(context, MemoAiRecorderService::class.java).apply {
         action = MemoAiRecorderService.ACTION_START
         putExtra(MemoAiRecorderService.EXTRA_SESSION_ID, sessionId)
         putExtra(MemoAiRecorderService.EXTRA_AUTHORIZED_AT, SystemClock.elapsedRealtime())
+        putExtra(MemoAiRecorderService.EXTRA_OP, op)
       }
-      ContextCompat.startForegroundService(context, intent)
-      RecorderController.awaitPhase(context, Phase.RECORDING, 5_000)
+      try {
+        ContextCompat.startForegroundService(context, intent)
+      } catch (error: Exception) {
+        RecorderController.rejectStart(error.message ?: "Could not start the recording service")
+        RecorderController.settle(op)
+        throw RecorderException(
+          RecorderController.lastError ?: "Could not start the recording service",
+        )
+      }
+      RecorderController.awaitSettled(context, op, Phase.RECORDING, 5_000)
     }
 
     AsyncFunction("pause") {
@@ -76,9 +86,15 @@ class MemoAiRecorderModule : Module() {
       if (!RecorderController.serviceAlive || RecorderController.phase != Phase.RECORDING) {
         throw RecorderException("Nothing is recording")
       }
-      RecorderController.prepareForCommand()
-      context.startService(command(context, MemoAiRecorderService.ACTION_PAUSE))
-      RecorderController.awaitPhase(context, Phase.PAUSED, 3_000)
+      val op = RecorderController.openOperation()
+      try {
+        context.startService(command(context, MemoAiRecorderService.ACTION_PAUSE, op))
+      } catch (error: Exception) {
+        RecorderController.failCommand(error.message ?: "Pause failed")
+        RecorderController.settle(op)
+        throw RecorderException(RecorderController.lastError ?: "Pause failed")
+      }
+      RecorderController.awaitSettled(context, op, Phase.PAUSED, 3_000)
     }
 
     AsyncFunction("resume") {
@@ -87,12 +103,18 @@ class MemoAiRecorderModule : Module() {
       if (!RecorderController.serviceAlive || RecorderController.phase != Phase.PAUSED) {
         throw RecorderException("Nothing is paused")
       }
-      RecorderController.prepareForCommand()
-      val intent = command(context, MemoAiRecorderService.ACTION_RESUME).apply {
+      val op = RecorderController.openOperation()
+      val intent = command(context, MemoAiRecorderService.ACTION_RESUME, op).apply {
         putExtra(MemoAiRecorderService.EXTRA_AUTHORIZED_AT, SystemClock.elapsedRealtime())
       }
-      context.startService(intent)
-      RecorderController.awaitPhase(context, Phase.RECORDING, 3_000)
+      try {
+        context.startService(intent)
+      } catch (error: Exception) {
+        RecorderController.failCommand(error.message ?: "Resume failed")
+        RecorderController.settle(op)
+        throw RecorderException(RecorderController.lastError ?: "Resume failed")
+      }
+      RecorderController.awaitSettled(context, op, Phase.RECORDING, 3_000)
     }
 
     AsyncFunction("stop") {
@@ -103,20 +125,27 @@ class MemoAiRecorderModule : Module() {
       if (!active) {
         RecorderController.statusMap(context)
       } else {
-        RecorderController.prepareForCommand()
-        context.startService(command(context, MemoAiRecorderService.ACTION_STOP))
-        RecorderController.awaitPhase(context, Phase.STOPPED, 4_000)
+        val op = RecorderController.openOperation()
+        try {
+          context.startService(command(context, MemoAiRecorderService.ACTION_STOP, op))
+        } catch (error: Exception) {
+          RecorderController.failCommand(error.message ?: "Stop failed")
+          RecorderController.settle(op)
+          throw RecorderException(RecorderController.lastError ?: "Stop failed")
+        }
+        RecorderController.awaitSettled(context, op, Phase.STOPPED, 4_000)
       }
     }
   }
 
-  private fun command(context: android.content.Context, action: String): Intent {
+  private fun command(context: Context, action: String, op: Long): Intent {
     return Intent(context, MemoAiRecorderService::class.java).apply {
       this.action = action
+      putExtra(MemoAiRecorderService.EXTRA_OP, op)
     }
   }
 
-  private fun requireContext(): android.content.Context {
+  private fun requireContext(): Context {
     return appContext.reactContext
       ?: appContext.currentActivity
       ?: throw RecorderException("MemoAI is not open")

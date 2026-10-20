@@ -17,3 +17,52 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
       - run: npm test
+
+  android-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/cache@v4
+        with:
+          path: ~/android-sdk
+          key: android-sdk-platforms-36-37-build-tools-37-${{ runner.os }}
+      - name: Install Android SDK
+        run: |
+          set -euo pipefail
+          SDK_ROOT="${HOME}/android-sdk"
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+          if [ ! -x "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" ]; then
+            curl -fL --retry 3 -o /tmp/cmdtools.zip https://dl.google.com/android/repository/commandlinetools-linux-13114758_latest.zip
+            rm -rf /tmp/cmdline-tools-extract
+            unzip -q /tmp/cmdtools.zip -d /tmp/cmdline-tools-extract
+            rm -rf "$SDK_ROOT/cmdline-tools/latest"
+            mv /tmp/cmdline-tools-extract/cmdline-tools "$SDK_ROOT/cmdline-tools/latest"
+          fi
+          yes | "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
+          "$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$SDK_ROOT" --install \
+            "platforms;android-37.0" \
+            "platforms;android-36" \
+            "build-tools;37.0.0" \
+            "build-tools;36.0.0" \
+            "platform-tools"
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+      - run: npm ci
+      - name: Prebuild the Android project
+        working-directory: apps/mobile
+        env:
+          EXPO_NO_TELEMETRY: "1"
+        run: npx expo prebuild --platform android --no-install
+      - name: Compile the recorder and merge the manifest
+        working-directory: apps/mobile/android
+        run: ./gradlew :memoai-recorder:compileDebugKotlin :app:processDebugMainManifest --stacktrace
+      - name: Check merged manifest class names
+        run: bash apps/mobile/scripts/verify-merged-manifest.sh apps/mobile/android

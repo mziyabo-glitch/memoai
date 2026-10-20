@@ -13,6 +13,8 @@ export type RecorderStatus = {
   sessionId: string | null;
   elapsedMs: number;
   fileUri: string | null;
+  pausedByFocus: boolean;
+  lastError: string | null;
 };
 
 export type LocalRecordingRecord = {
@@ -23,6 +25,7 @@ export type LocalRecordingRecord = {
   startedAtMs: number;
   updatedAtMs: number;
   playable: boolean;
+  corrupt: boolean;
 };
 
 type MemoAiRecorderEvents = {

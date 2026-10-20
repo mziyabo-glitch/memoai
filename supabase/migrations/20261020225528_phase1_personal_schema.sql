@@ -28,6 +28,7 @@ create table public.recordings (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint recordings_id_user_unique unique (id, user_id),
+  constraint recordings_id_meeting_user_unique unique (id, meeting_id, user_id),
   constraint recordings_meeting_owner_fk
     foreign key (meeting_id, user_id)
     references public.meetings (id, user_id)
@@ -50,9 +51,11 @@ create table public.transcript_segments (
     foreign key (meeting_id, user_id)
     references public.meetings (id, user_id)
     on delete cascade,
-  constraint transcript_segments_recording_owner_fk
-    foreign key (recording_id, user_id)
-    references public.recordings (id, user_id)
+  -- meeting_id must be the meeting that owns recording_id. Separate
+  -- foreign keys would allow meeting B with a recording from meeting A.
+  constraint transcript_segments_recording_meeting_fk
+    foreign key (recording_id, meeting_id, user_id)
+    references public.recordings (id, meeting_id, user_id)
     on delete cascade,
   constraint transcript_segments_range check (start_ms >= 0 and end_ms >= start_ms)
 );

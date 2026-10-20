@@ -28,9 +28,9 @@ The phone records without a Supabase project. Use the dashboard when you want th
 
 Row level security is enabled. Each row is scoped by `user_id` to `auth.users`, and the policies allow select, insert, update, and delete only for that user. There is no transcription job in this phase.
 
-## Connect EAS and build the development APK
+## Connect EAS and install an APK
 
-The Android app is a development build. Expo Go does not contain the microphone foreground service.
+Expo Go does not contain the microphone foreground service. Install an EAS APK. There are two profiles in `apps/mobile/eas.json`.
 
 1. Sign in at [expo.dev](https://expo.dev).
 2. From `apps/mobile`:
@@ -42,26 +42,53 @@ The Android app is a development build. Expo Go does not contain the microphone 
 
    `eas init` links this app and prints the project page on expo.dev (typically `https://expo.dev/accounts/<account>/projects/memoai`). The project id it writes into the Expo config is not a secret. The login token stays on your machine.
 
-3. Build an internal Android APK:
+### Development APK, with a JavaScript server
 
-   ```bash
-   npx eas-cli build --platform android --profile development
-   ```
+Profile `development` sets `developmentClient`, `distribution: internal`, and `android.buildType: apk`. The installed app is a dev client. It does not contain the JavaScript bundle. It loads the bundle from Metro, and recording does not run until that server is connected.
 
-   `apps/mobile/eas.json` profile `development` sets `developmentClient`, `distribution: internal`, and `android.buildType: apk`.
+```bash
+cd apps/mobile
+npx eas-cli build --platform android --profile development
+```
 
-4. Install that APK. Do not install Expo Go for this.
-5. From `apps/mobile`, start the bundler and open the project in the development build on the same network:
+Install the APK from the Expo build page. Do not install Expo Go.
 
-   ```bash
-   npm run start
-   ```
+On a computer that is on the same LAN as the phone, start Metro and open the project in the dev client:
+
+```bash
+cd apps/mobile
+npm run start
+```
+
+`npm run start` runs `expo start --dev-client`.
+
+A Cursor cloud agent is not on the phone’s LAN, so the phone cannot open a Metro server bound to that VM. From the agent, start Metro through Expo’s tunnel instead. The tunnel is the cloud-hosted bundle server. It uses the Expo account and `@expo/ngrok`. Leave the process running while the phone is open:
+
+```bash
+cd apps/mobile
+npx expo start --dev-client --tunnel
+```
+
+Open the URL that command prints in the development build.
+
+### Preview APK, phone only
+
+Profile `preview` sets `distribution: internal` and `android.buildType: apk`. It does not set `developmentClient`, so EAS embeds the JavaScript bundle. After you install it, the phone records with no computer and no Metro.
+
+```bash
+cd apps/mobile
+npx eas-cli build --platform android --profile preview
+```
+
+Install that APK and open MemoAI. Use this build when you only have the phone. Use the development build when you want to reload JavaScript while working.
 
 Package name: `com.memoai.app`.
 
-Android permissions: `RECORD_AUDIO`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MICROPHONE`, `POST_NOTIFICATIONS`. The service is not exported, uses `foregroundServiceType="microphone"`, and calls `startForeground` with type `MICROPHONE` (API 34+) before `MediaRecorder` starts. The ongoing notification says “MemoAI is recording” and has a Stop action. The system microphone indicator is left visible. The service does not hold a screen wake lock. Audio is AAC in an MPEG-4 `.m4a` under the app’s own files directory.
+Android permissions: `RECORD_AUDIO`, `FOREGROUND_SERVICE`, `FOREGROUND_SERVICE_MICROPHONE`, `POST_NOTIFICATIONS`. The service and the stop receiver are registered with fully qualified class names (`expo.modules.memoairecorder.MemoAiRecorderService` and `expo.modules.memoairecorder.StopRecordingReceiver`). The service is not exported, uses `foregroundServiceType="microphone"`, and calls `startForeground` with type `MICROPHONE` (API 34+) before `MediaRecorder` starts. The ongoing notification says “MemoAI is recording” and has a Stop action. While capture is paused, including a short audio interruption, the notification says the recording is paused. The system microphone indicator is left visible. The service does not hold a screen wake lock. Audio is AAC in an MPEG-4 `.m4a` under the app’s own files directory.
 
-Capture starts only after you tap Start or Resume while the app is in the foreground. If Android stops the service, or audio focus or capture ends, the partial file is kept and the session becomes interrupted. On the next launch, a saved recording or paused session whose service is gone is recovered as interrupted and is not deleted.
+The notification Stop action is a `PendingIntent.getForegroundService` (API 26+) aimed at the service. `handleStop` calls `startForeground` with the microphone type on API 34+ before it stops capture, then removes the notification. That is the user-initiated foreground-service path, so Stop does not depend on a background `startService` from a broadcast. The receiver is still registered and calls `startForegroundService` if a broadcast arrives. This path is checked from the source and from the merged manifest. It has not been tried on a phone.
+
+Capture starts only after you tap Start or Resume while the app is in the foreground. A notification, navigation prompt, or other short audio loss pauses the same session, keeps the foreground service, and resumes when focus returns. The screen says Paused during that gap. A pause you requested yourself does not resume on its own. A permanent audio-focus loss, a capture failure, or Android stopping the service ends the session as interrupted and keeps the partial file. If `MediaRecorder.stop()` fails, the file is still kept, marked incomplete, and is not offered as a saved playable recording. On the next launch, a saved recording or paused session whose service is gone is recovered as interrupted and is not deleted. Returning to the app with the microphone or notification permission turned off leaves the ready screen and shows the explanation again. A rejected Start, including one that happens while a previous session is already interrupted, returns the error to the app instead of looking successful.
 
 ## Connect Vercel
 
@@ -79,7 +106,7 @@ npm run typecheck
 npm test
 ```
 
-GitHub Actions runs lint, TypeScript, and the shared session tests on `push` and `pull_request`.
+GitHub Actions runs lint, TypeScript, and the shared session tests on `push` and `pull_request`. A second job installs Java 21 and the Android SDK, runs `npx expo prebuild --platform android --no-install`, compiles the Kotlin recorder module, merges the app manifest, and checks that the service and receiver class names are fully qualified.
 
 `npm test` covers the session states `idle`, `recording`, `paused`, `interrupted`, and `stopped`, including the invariant that recording is shown only when the service confirms it.
 

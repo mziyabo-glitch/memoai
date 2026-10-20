@@ -12,11 +12,14 @@ internal data class SessionMeta(
   val startedAtMs: Long,
   val updatedAtMs: Long,
   val fileName: String,
+  val playable: Boolean,
+  val corrupt: Boolean,
 )
 
 /**
  * Session metadata sits beside the audio file in app-specific storage.
- * Nothing here is deleted when a capture is interrupted.
+ * Partial files are kept, including a file MediaRecorder.stop() could not
+ * finalize. Those files are marked corrupt and not playable.
  */
 internal object RecordingStore {
   fun directory(context: Context): File {
@@ -78,16 +81,28 @@ internal object RecordingStore {
       .put("startedAtMs", meta.startedAtMs)
       .put("updatedAtMs", meta.updatedAtMs)
       .put("fileName", meta.fileName)
+      .put("playable", meta.playable)
+      .put("corrupt", meta.corrupt)
   }
 
   private fun fromJson(json: JSONObject): SessionMeta {
+    val state = json.getString("state")
+    val playable = if (json.has("playable")) {
+      json.getBoolean("playable")
+    } else {
+      // Older metadata had no flag. Only a stopped session was finalized.
+      state == "stopped"
+    }
+    val corrupt = if (json.has("corrupt")) json.getBoolean("corrupt") else false
     return SessionMeta(
       id = json.getString("id"),
-      state = json.getString("state"),
+      state = state,
       elapsedMs = json.getLong("elapsedMs"),
       startedAtMs = json.getLong("startedAtMs"),
       updatedAtMs = json.getLong("updatedAtMs"),
       fileName = json.getString("fileName"),
+      playable = playable,
+      corrupt = corrupt,
     )
   }
 }

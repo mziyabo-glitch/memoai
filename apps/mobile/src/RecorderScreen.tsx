@@ -97,6 +97,7 @@ export function RecorderScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [playingUri, setPlayingUri] = useState<string | null>(null);
+  const [pausedByFocus, setPausedByFocus] = useState(false);
 
   const refreshLibrary = useCallback(() => {
     if (!recorder) {
@@ -111,6 +112,7 @@ export function RecorderScreen() {
     }
     const status = recorder.getStatus();
     setSessionId(status.sessionId);
+    setPausedByFocus(status.pausedByFocus);
     const next = projectStatus(status);
     setVisible(next);
     return next;
@@ -151,6 +153,7 @@ export function RecorderScreen() {
     if (!recorder || gate !== "ready") {
       return;
     }
+    let cancelled = false;
     recorder.reconcile();
     refreshStatus();
     refreshLibrary();
@@ -161,13 +164,27 @@ export function RecorderScreen() {
       refreshLibrary();
     }, 2000);
     const appState = AppState.addEventListener("change", (next) => {
-      if (next === "active") {
+      if (next !== "active") {
+        return;
+      }
+      void (async () => {
+        const current = await readCapturePermission();
+        if (cancelled) {
+          return;
+        }
+        setPermission(current);
+        if (!capturePermissionGranted(current)) {
+          setDenied(true);
+          setGate("explain");
+          return;
+        }
         recorder.reconcile();
         refreshStatus();
         refreshLibrary();
-      }
+      })();
     });
     return () => {
+      cancelled = true;
       clearInterval(timer);
       clearInterval(libraryTimer);
       appState.remove();
@@ -205,6 +222,7 @@ export function RecorderScreen() {
     try {
       const status = await recorder[action]();
       setSessionId(status.sessionId);
+      setPausedByFocus(status.pausedByFocus);
       setVisible(projectStatus(status));
       refreshLibrary();
     } catch (commandError) {
@@ -339,7 +357,13 @@ export function RecorderScreen() {
             {visible.showRecording ? <View style={styles.dot} /> : null}
             <Text style={styles.status}>{statusLabel(visible)}</Text>
           </View>
-          <Text style={styles.hint}>{hintFor(visible)}</Text>
+          <Text style={styles.hint}>
+            {hintFor(
+              visible,
+              recordings.find((recording) => recording.id === sessionId),
+              pausedByFocus,
+            )}
+          </Text>
         </View>
         {error ? <Text style={styles.error}>{error}</Text> : null}
         <View style={styles.controls}>
@@ -389,14 +413,24 @@ export function RecorderScreen() {
   );
 }
 
-function hintFor(visible: VisibleSession): string {
+function hintFor(
+  visible: VisibleSession,
+  active: LocalRecordingRecord | undefined,
+  pausedByFocus: boolean,
+): string {
   if (visible.showRecording) {
     return "Locking the screen or switching apps keeps this service recording.";
   }
   if (visible.state === "paused") {
+    if (pausedByFocus) {
+      return "Paused while another app uses audio. Recording resumes when the microphone is free. Paused time is not counted.";
+    }
     return "Paused time is not added to the duration.";
   }
   if (visible.state === "interrupted") {
+    if (!active || active.corrupt || !active.playable) {
+      return "The file is still on this phone, but it may be incomplete and cannot be played.";
+    }
     return "Android stopped the recording. The partial audio is still on this phone.";
   }
   if (visible.state === "stopped") {
@@ -416,11 +450,17 @@ function libraryState(
   if (recording.id === sessionId && visible.state === "paused") {
     return "Paused";
   }
+  if (recording.corrupt || !recording.playable) {
+    return "Incomplete";
+  }
   const parsed = parseSessionState(recording.state);
+  if (parsed === "stopped") {
+    return "Saved";
+  }
   if (parsed === "interrupted" || parsed === "recording" || parsed === "paused") {
     return "Interrupted";
   }
-  return "Saved";
+  return "Incomplete";
 }
 
 function Shell({ children }: { children: ReactNode }) {

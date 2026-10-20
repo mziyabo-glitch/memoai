@@ -6,13 +6,13 @@
 
   <application>
     <service
-      android:name=".MemoAiRecorderService"
+      android:name="expo.modules.memoairecorder.MemoAiRecorderService"
       android:exported="false"
       android:foregroundServiceType="microphone"
       android:stopWithTask="false" />
 
     <receiver
-      android:name=".StopRecordingReceiver"
+      android:name="expo.modules.memoairecorder.StopRecordingReceiver"
       android:exported="false" />
   </application>
 </manifest>
