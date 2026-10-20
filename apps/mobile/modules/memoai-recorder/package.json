@@ -1,0 +1,12 @@
+{
+  "name": "memoai-recorder",
+  "version": "0.1.0",
+  "description": "Android microphone foreground service for MemoAI",
+  "main": "index.ts",
+  "types": "index.ts",
+  "peerDependencies": {
+    "expo": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}
