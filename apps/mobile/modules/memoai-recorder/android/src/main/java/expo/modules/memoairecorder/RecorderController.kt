@@ -349,6 +349,22 @@ internal object RecorderController {
 
   fun stop(context: Context): Boolean {
     synchronized(lock) {
+      if (phase == Phase.STOPPED) {
+        // Notification Stop carries no operation id. A second stop must not
+        // replace a finished save with "Nothing is recording".
+        lastError = null
+        return true
+      }
+      if (phase == Phase.INTERRUPTED) {
+        if (lastError == null) {
+          lastError = if (activeCorrupt) {
+            "The recording was kept, but the file may be incomplete"
+          } else {
+            "The recording was interrupted"
+          }
+        }
+        return false
+      }
       if (phase != Phase.RECORDING && phase != Phase.PAUSED) {
         lastError = "Nothing is recording"
         return false

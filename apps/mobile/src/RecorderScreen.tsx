@@ -340,7 +340,7 @@ export function RecorderScreen() {
     (visible.state === "idle" ||
       visible.state === "stopped" ||
       visible.state === "interrupted");
-  const canPause = !busy && visible.showRecording;
+  const canPause = !busy && (visible.showRecording || pausedByFocus);
   const canResume = !busy && visible.state === "paused";
   const canStop = !busy && (visible.showRecording || visible.state === "paused");
   const timerMs =
@@ -423,7 +423,7 @@ function hintFor(
   }
   if (visible.state === "paused") {
     if (pausedByFocus) {
-      return "Paused while another app uses audio. Recording resumes when the microphone is free. Paused time is not counted.";
+      return "Paused while another app uses audio. Tap Pause to stay paused. Otherwise recording resumes when the microphone is free. Paused time is not counted.";
     }
     return "Paused time is not added to the duration.";
   }

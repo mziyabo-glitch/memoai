@@ -83,7 +83,12 @@ class MemoAiRecorderModule : Module() {
 
     AsyncFunction("pause") {
       val context = requireContext()
-      if (!RecorderController.serviceAlive || RecorderController.phase != Phase.RECORDING) {
+      val phase = RecorderController.phase
+      // A transient-focus pause is already PAUSED. Pause must still run so the
+      // user can take ownership and block the automatic resume.
+      val canPause = RecorderController.serviceAlive &&
+        (phase == Phase.RECORDING || phase == Phase.PAUSED)
+      if (!canPause) {
         throw RecorderException("Nothing is recording")
       }
       val op = RecorderController.openOperation()

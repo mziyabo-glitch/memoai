@@ -179,6 +179,8 @@ class MemoAiRecorderService : Service() {
         Log.e(TAG, "startForeground before stop failed", error)
       }
       try {
+        // A notification stop has no operation id. stop() keeps a session
+        // that another stop already finished, saved or interrupted.
         RecorderController.stop(this)
       } catch (error: Exception) {
         Log.e(TAG, "stop failed", error)
