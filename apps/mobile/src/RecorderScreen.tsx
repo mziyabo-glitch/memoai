@@ -12,8 +12,10 @@ import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from "expo-au
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
   formatDuration,
+  formatFileSize,
   parseSessionState,
   projectVisibleState,
+  totalRecordingBytes,
   type SessionState,
   type VisibleSession,
 } from "@memoai/shared";
@@ -248,6 +250,7 @@ export function RecorderScreen() {
     try {
       if (playingUri === recording.fileUri && playback.playing) {
         player.pause();
+        void player.seekTo(0);
         return;
       }
       if (playingUri !== recording.fileUri) {
@@ -372,27 +375,43 @@ export function RecorderScreen() {
           <Control label="Resume" enabled={canResume} onPress={() => void runCommand("resume")} tone="record" />
           <Control label="Stop" enabled={canStop} onPress={() => void runCommand("stop")} />
         </View>
-        <Text style={styles.section}>Library</Text>
+        <View style={styles.libraryHeader}>
+          <Text style={styles.section}>Library</Text>
+          <Text style={styles.storageTotal}>
+            {formatFileSize(
+              totalRecordingBytes(recordings.map((item) => item.sizeBytes)),
+            )}{" "}
+            stored on this phone
+          </Text>
+        </View>
         {recordings.length === 0 ? (
           <Text style={styles.body}>No recordings yet.</Text>
         ) : (
           recordings.map((recording) => {
-            const active =
+            const playingThis =
               playingUri === recording.fileUri && playback.playing;
             const locked =
               visible.showRecording || visible.state === "paused";
             return (
               <View key={recording.id} style={styles.row}>
                 <View style={styles.rowText}>
-                  <Text style={styles.rowTitle}>
-                    {formatDuration(recording.elapsedMs)}
+                  <Text style={styles.rowState}>
+                    {libraryState(recording, visible, sessionId)}
                   </Text>
-                  <Text style={styles.rowMeta}>
-                    {libraryState(recording, visible, sessionId)} ·{" "}
-                    {new Date(recording.startedAtMs).toLocaleString()}
-                  </Text>
+                  <Fact label="Duration" value={formatDuration(recording.elapsedMs)} />
+                  <Fact label="Date" value={recordingDate(recording.startedAtMs)} />
+                  <Fact label="Time" value={recordingTime(recording.startedAtMs)} />
+                  <Fact
+                    label="Size"
+                    value={formatFileSize(recording.sizeBytes)}
+                    emphasize
+                  />
                 </View>
                 <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={
+                    playingThis ? "Stop playback" : "Play recording"
+                  }
                   style={[
                     styles.play,
                     (!recording.playable || locked) && styles.playDisabled,
@@ -401,7 +420,7 @@ export function RecorderScreen() {
                   onPress={() => togglePlayback(recording)}
                 >
                   <Text style={styles.playText}>
-                    {active ? "Pause" : "Play"}
+                    {playingThis ? "Stop play" : "Play"}
                   </Text>
                 </Pressable>
               </View>
@@ -437,6 +456,40 @@ function hintFor(
     return "Saved in the library below.";
   }
   return "Start when everyone knows they are being recorded.";
+}
+
+function recordingDate(startedAtMs: number): string {
+  return new Date(startedAtMs).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function recordingTime(startedAtMs: number): string {
+  return new Date(startedAtMs).toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function Fact({
+  label,
+  value,
+  emphasize,
+}: {
+  label: string;
+  value: string;
+  emphasize?: boolean;
+}) {
+  return (
+    <View style={styles.fact}>
+      <Text style={styles.factLabel}>{label}</Text>
+      <Text style={[styles.factValue, emphasize && styles.factValueAccent]}>
+        {value}
+      </Text>
+    </View>
+  );
 }
 
 function libraryState(
@@ -640,7 +693,38 @@ const styles = StyleSheet.create({
     fontSize: 13,
     letterSpacing: 1.6,
     textTransform: "uppercase",
+  },
+  libraryHeader: {
     marginTop: 20,
+    gap: 6,
+  },
+  storageTotal: {
+    color: theme.accent,
+    fontSize: 15,
+    fontVariant: ["tabular-nums"],
+  },
+  rowState: {
+    color: theme.muted,
+    fontSize: 13,
+    letterSpacing: 0.4,
+  },
+  fact: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "baseline",
+    gap: 12,
+  },
+  factLabel: {
+    color: theme.muted,
+    fontSize: 13,
+  },
+  factValue: {
+    color: theme.text,
+    fontSize: 16,
+    fontVariant: ["tabular-nums"],
+  },
+  factValueAccent: {
+    color: theme.accent,
   },
   row: {
     backgroundColor: theme.surface,

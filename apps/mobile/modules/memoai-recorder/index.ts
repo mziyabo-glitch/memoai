@@ -26,6 +26,8 @@ export type LocalRecordingRecord = {
   updatedAtMs: number;
   playable: boolean;
   corrupt: boolean;
+  /** Byte length of the file on disk. Not derived from duration. */
+  sizeBytes: number;
 };
 
 type MemoAiRecorderEvents = {

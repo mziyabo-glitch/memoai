@@ -9,6 +9,8 @@ export {
   reduceSession,
 } from "./session";
 
+export { formatFileSize, totalRecordingBytes } from "./storage";
+
 export type {
   CommandResult,
   ServicePhase,
