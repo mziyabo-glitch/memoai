@@ -66,3 +66,6 @@ jobs:
         run: ./gradlew :memoai-recorder:compileDebugKotlin :app:processDebugMainManifest --stacktrace
       - name: Check merged manifest class names
         run: bash apps/mobile/scripts/verify-merged-manifest.sh apps/mobile/android
+      - name: Test native metadata crash recovery
+        working-directory: apps/mobile/android
+        run: ./gradlew :memoai-recorder:testDebugUnitTest --stacktrace

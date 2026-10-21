@@ -2,6 +2,7 @@ package expo.modules.memoairecorder
 
 import android.content.Context
 import android.net.Uri
+import android.util.AtomicFile
 import org.json.JSONObject
 import java.io.File
 
@@ -34,25 +35,36 @@ internal object RecordingStore {
     return Uri.fromFile(fileFor(context, fileName)).toString()
   }
 
+  @Synchronized
   fun write(context: Context, meta: SessionMeta) {
     val dir = directory(context)
     val json = toJson(meta).toString()
     val target = File(dir, "${meta.id}.json")
-    val tmp = File(dir, "${meta.id}.json.tmp")
-    tmp.writeText(json)
-    if (!tmp.renameTo(target)) {
-      target.writeText(json)
-      tmp.delete()
+    val atomic = AtomicFile(target)
+    val stream = atomic.startWrite()
+    try {
+      stream.write(json.toByteArray(Charsets.UTF_8))
+      atomic.finishWrite(stream)
+    } catch (error: Throwable) {
+      atomic.failWrite(stream)
+      throw error
     }
   }
 
+  @Synchronized
   fun readAll(context: Context): List<SessionMeta> {
     val files = directory(context).listFiles { file ->
-      file.isFile && file.name.endsWith(".json") && !file.name.endsWith(".tmp")
+      file.isFile && (file.name.endsWith(".json") || file.name.endsWith(".json.bak"))
     } ?: return emptyList()
-    return files.mapNotNull { file ->
+    // Older AtomicFile implementations may leave only the backup after a crash.
+    // Open through AtomicFile so it restores that committed version first.
+    return files.map { file ->
+      if (file.name.endsWith(".bak")) File(file.parentFile, file.name.removeSuffix(".bak")) else file
+    }.distinctBy { it.name }.mapNotNull { file ->
       try {
-        fromJson(JSONObject(file.readText()))
+        AtomicFile(file).openRead().bufferedReader(Charsets.UTF_8).use {
+          fromJson(JSONObject(it.readText()))
+        }
       } catch (_: Exception) {
         null
       }
@@ -63,6 +75,7 @@ internal object RecordingStore {
    * A metadata file that still says recording or paused, while that session
    * is not the live service, is a partial file from a dead process.
    */
+  @Synchronized
   fun markInterruptedIfOrphaned(context: Context, liveSessionId: String?) {
     val now = System.currentTimeMillis()
     for (meta in readAll(context)) {
