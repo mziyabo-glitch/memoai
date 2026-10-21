@@ -1,0 +1,5 @@
+---
+description: MemoAI contribution and recording privacy rules
+alwaysApply: true
+---
+Follow AGENTS.md and docs/ARCHITECTURE.md. Use a feature branch and PR. Preserve explicit, visible Android recording, local recovery, private cloud data and server-only secrets. Never claim hardware tests based on successful compilation.
