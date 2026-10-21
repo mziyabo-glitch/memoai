@@ -478,8 +478,9 @@ internal object RecorderController {
       .sortedByDescending { it.startedAtMs }
       .map { meta ->
         val file = RecordingStore.fileFor(context, meta.fileName)
+        val sizeBytes = if (file.exists()) file.length() else 0L
         val inProgress = meta.state == "recording" || meta.state == "paused"
-        val nonempty = file.exists() && file.length() > 0L
+        val nonempty = sizeBytes > 0L
         val playable = !inProgress &&
           nonempty &&
           !meta.corrupt &&
@@ -494,6 +495,7 @@ internal object RecorderController {
           "updatedAtMs" to meta.updatedAtMs,
           "playable" to playable,
           "corrupt" to corrupt,
+          "sizeBytes" to sizeBytes,
         )
       }
   }
