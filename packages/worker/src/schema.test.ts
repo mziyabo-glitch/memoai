@@ -2,7 +2,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const sql = readFileSync(
-  new URL("../../../supabase/migrations/20261024105627_notes_processing_foundation.sql", import.meta.url),
+  new URL("../../../supabase/migrations/20261024150753_notes_processing_foundation.sql", import.meta.url),
+  "utf8",
+);
+const fix = readFileSync(
+  new URL("../../../supabase/migrations/20261024151532_fix_summary_job_delete.sql", import.meta.url),
   "utf8",
 );
 
@@ -19,5 +23,13 @@ describe("processing migration", () => {
     expect(sql).toContain("request_sent_at");
     expect(sql).toContain("origin = 'user'");
     expect(sql).toContain("20971520");
+    expect(fix).toMatch(/on delete set null \(job_id\)/i);
+    expect(fix).not.toMatch(/user_id\)\s+on delete set null\s*;/i);
+  });
+
+  it("does not put the worker secret in the phone app", () => {
+    const account = readFileSync(new URL("../../../apps/mobile/src/account.ts", import.meta.url), "utf8");
+    const upload = readFileSync(new URL("../../../apps/mobile/src/uploadAudio.ts", import.meta.url), "utf8");
+    expect(`${account}\n${upload}`).not.toMatch(/MEMOAI_WORKER_SECRET|SERVICE_ROLE|OPENAI_API_KEY/);
   });
 });

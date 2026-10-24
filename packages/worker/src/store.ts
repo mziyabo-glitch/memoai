@@ -2,8 +2,9 @@ import { createHash } from "node:crypto";
 
 import {
   MAX_NOTES_AUDIO_MS,
+  MAX_SECTION_BYTES,
   OPENAI_MAX_AUDIO_BYTES,
-  OVERSIZED_SINGLE_FILE_DETAIL,
+  STORED_AUDIO_LIMIT_DETAIL,
   pathOwnedBy,
   shouldPublish,
   transcriptTimeline,
@@ -15,7 +16,7 @@ import {
 
 export type LoadedJob =
   | { ok: true; job: ProcessJob; meetingId: string }
-  | { ok: false; reason: "not-found" | "not-owner" | "no-consent" | "too-long" | "over-provider-bytes" | "deleted"; detail: string };
+  | { ok: false; reason: "not-found" | "not-owner" | "no-consent" | "too-long" | "section-too-large" | "over-provider-bytes" | "deleted"; detail: string };
 
 type JobRow = {
   id: string;
@@ -164,8 +165,8 @@ export function createRestStore(input: {
       if (job.total_duration_ms > MAX_NOTES_AUDIO_MS || durationMs > MAX_NOTES_AUDIO_MS) {
         return { ok: false, reason: "too-long", detail: "Finished audio is longer than 90 minutes, so it was not sent." };
       }
-      if (sections.some((section) => section.size_bytes > OPENAI_MAX_AUDIO_BYTES || section.size_bytes <= 0)) {
-        return { ok: false, reason: "over-provider-bytes", detail: OVERSIZED_SINGLE_FILE_DETAIL };
+      if (sections.some((section) => section.size_bytes > MAX_SECTION_BYTES || section.size_bytes > OPENAI_MAX_AUDIO_BYTES || section.size_bytes <= 0)) {
+        return { ok: false, reason: "section-too-large", detail: STORED_AUDIO_LIMIT_DETAIL };
       }
       ownerId = job.user_id;
       meetingId = recording.meeting_id;

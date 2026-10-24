@@ -95,8 +95,9 @@ export type AudioSlice = {
   independentlyDecodable: boolean;
 };
 
-export const OVERSIZED_SINGLE_FILE_DETAIL =
-  "This recording is one file larger than 25 MB, the maximum for one transcription request. MemoAI did not cut, replace, or delete the original file. Recordings from the current app are already stored as ordered sections under 20 MiB, and those can be uploaded. This older file stays on the phone.";
+/** Matches the private memoai-audio bucket and audio_sections.size_bytes. */
+export const STORED_AUDIO_LIMIT_DETAIL =
+  "This finished audio is larger than 20 MiB, which is the most MemoAI stores for one section. The original file was not changed or deleted. New recordings are already saved as smaller sections and can be uploaded. This file stays on the phone.";
 
 export type ProcessJob = {
   id: string;
@@ -152,10 +153,7 @@ export function planUpload(input: {
   if (finished.some((section) => !HASH.test(section.sha256))) {
     return { ok: false, reason: "missing-hash" };
   }
-  if (finished.some((section) => section.sizeBytes > OPENAI_MAX_AUDIO_BYTES)) {
-    return { ok: false, reason: "over-provider-bytes" };
-  }
-  if (finished.some((section) => section.sizeBytes > MAX_SECTION_BYTES)) {
+  if (finished.some((section) => section.sizeBytes > MAX_SECTION_BYTES || section.sizeBytes > OPENAI_MAX_AUDIO_BYTES)) {
     return { ok: false, reason: "section-too-large" };
   }
   if (finished.some((section) => section.sizeBytes <= 0)) {
@@ -223,7 +221,7 @@ export function splitWithoutTouchingSource(input: {
   | { action: "split"; copies: Uint8Array[]; sourcePath: string; writes: readonly [] } {
   const blocked = {
     action: "blocked" as const,
-    detail: OVERSIZED_SINGLE_FILE_DETAIL,
+    detail: STORED_AUDIO_LIMIT_DETAIL,
     sourcePath: input.sourcePath,
     writes: [] as const,
   };
@@ -238,6 +236,7 @@ export function splitWithoutTouchingSource(input: {
       !Number.isInteger(slice.length) ||
       slice.offset < 0 ||
       slice.length <= 0 ||
+      slice.length > MAX_SECTION_BYTES ||
       slice.length > OPENAI_MAX_AUDIO_BYTES ||
       slice.offset < cursor ||
       slice.offset + slice.length > input.source.byteLength
@@ -255,6 +254,23 @@ export function splitWithoutTouchingSource(input: {
     }),
     sourcePath: input.sourcePath,
     writes: [],
+  };
+}
+
+/** The phone calls this with the signed-in user's access token. It has no place for a worker secret. */
+export function notesStartRequest(input: {
+  apiUrl: string;
+  accessToken: string;
+  jobId: string;
+}): { url: string; method: "POST"; headers: Record<string, string>; body: string } {
+  return {
+    url: `${input.apiUrl.replace(/\/$/, "")}/api/notes/step`,
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${input.accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ jobId: input.jobId }),
   };
 }
 

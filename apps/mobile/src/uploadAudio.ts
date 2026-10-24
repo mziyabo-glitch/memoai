@@ -1,6 +1,7 @@
 import {
   NOTES_UPLOAD_EXPLANATION,
-  OVERSIZED_SINGLE_FILE_DETAIL,
+  STORED_AUDIO_LIMIT_DETAIL,
+  notesStartRequest,
   audioObjectPath,
   createJob,
   interpretUploadError,
@@ -15,7 +16,7 @@ import { getSupabase } from "./account";
 
 export type UploadOutcome =
   | { ok: false; uploaded: false; reason: string; acknowledged: AcknowledgedSection[] }
-  | { ok: true; uploaded: true; job: ProcessJob; acknowledged: AcknowledgedSection[] };
+  | { ok: true; uploaded: true; job: ProcessJob; cloudJobId: string; acknowledged: AcknowledgedSection[] };
 
 /**
  * Uploads finished sections after consent. Unfinished files are not in the plan.
@@ -34,6 +35,7 @@ export async function uploadFinishedAudio(input: {
   const supabase = getSupabase();
   const session = supabase ? await supabase.auth.getSession() : null;
   const ownerId = session?.data.session?.user.id ?? null;
+  const accessToken = session?.data.session?.access_token ?? null;
   const plan = planUpload({
     recordingId: input.recordingId,
     ownerId,
@@ -104,7 +106,12 @@ export async function uploadFinishedAudio(input: {
   if (!recorded.ok) {
     return { ok: false, uploaded: false, reason: recorded.reason, acknowledged: uploaded.acknowledged };
   }
-  return { ok: true, uploaded: true, job: created.job, acknowledged: uploaded.acknowledged };
+  const apiUrl = process.env.EXPO_PUBLIC_NOTES_API_URL;
+  if (apiUrl && accessToken) {
+    const start = notesStartRequest({ apiUrl, accessToken, jobId: recorded.cloudJobId });
+    await fetch(start.url, { method: start.method, headers: start.headers, body: start.body }).catch(() => undefined);
+  }
+  return { ok: true, uploaded: true, job: created.job, cloudJobId: recorded.cloudJobId, acknowledged: uploaded.acknowledged };
 }
 
 async function recordJob(
@@ -114,7 +121,7 @@ async function recordJob(
   consentAt: string,
   job: ProcessJob,
   sections: readonly SectionInput[],
-): Promise<{ ok: true } | { ok: false; reason: string }> {
+): Promise<{ ok: true; cloudJobId: string } | { ok: false; reason: string }> {
   const existing = await supabase
     .from("recordings")
     .select("id")
@@ -196,7 +203,7 @@ async function recordJob(
   }));
   const savedSteps = await supabase.from("processing_steps").insert(steps);
   if (savedSteps.error) return { ok: false, reason: savedSteps.error.message };
-  return { ok: true };
+  return { ok: true, cloudJobId: savedJob.data.id as string };
 }
 
 export async function deleteUploadedAudio(input: {
@@ -249,16 +256,16 @@ function reasonText(reason: string): string {
       return "There is no finished audio to upload. Recovery files stay on this phone.";
     case "missing-hash":
       return "This recording has no section hash yet, so it was not uploaded.";
-    case "section-too-large":
-      return "A finished section is larger than 20 MiB. The original file was not changed or deleted, and it was not uploaded.";
-    case "over-provider-bytes": {
+    case "section-too-large": {
       const decision = splitWithoutTouchingSource({
         source: new Uint8Array(),
         sourcePath: "recording",
         slices: null,
       });
-      return decision.action === "blocked" ? decision.detail : OVERSIZED_SINGLE_FILE_DETAIL;
+      return decision.action === "blocked" ? decision.detail : STORED_AUDIO_LIMIT_DETAIL;
     }
+    case "over-provider-bytes":
+      return "A section has no usable audio, so it was not uploaded. The original file was not changed.";
     default:
       return "The upload did not start.";
   }

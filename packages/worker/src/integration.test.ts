@@ -235,6 +235,46 @@ describe("notes worker over mocked HTTP", () => {
     expect(world.tables.transcript_segments).toEqual([]);
     expect(JSON.stringify(world.tables.processing_steps)).not.toContain("late transcript");
   });
+
+  it("lets a signed-in owner reach a disabled provider and refuses the other account", async () => {
+    const world = worldFor([
+      { bytes: new Uint8Array([4]), durationMs: 1_000, text: "Hello there", start: 0, end: 1 },
+    ]);
+    const env = {
+      SUPABASE_URL: "https://example.supabase.co",
+      SUPABASE_SERVICE_ROLE_KEY: "service-role-test",
+      MEMOAI_WORKER_SECRET: "worker-secret",
+    };
+    const owner = await handleNotesRequest(requestFor("job-1", undefined, "user-a"), {
+      env,
+      fetchImpl: withAuth(world),
+      now: 1_000,
+    });
+    expect(owner.status).toBe(409);
+    expect(await owner.json()).toMatchObject({ error: "provider-disabled" });
+    expect(world.openaiUrls).toEqual([]);
+    const other = await handleNotesRequest(requestFor("job-1", undefined, "user-b"), {
+      env,
+      fetchImpl: withAuth(world),
+      now: 1_000,
+    });
+    expect(other.status).toBe(403);
+    expect(world.openaiUrls).toEqual([]);
+  });
+
+  it("does not start a provider call when the hosting budget is already spent", async () => {
+    const world = worldFor([
+      { bytes: new Uint8Array([4]), durationMs: 1_000, text: "Hello there", start: 0, end: 1 },
+    ]);
+    const response = await handleNotesRequest(requestFor("job-1"), {
+      env: { ...allowed, MEMOAI_STEP_BUDGET_MS: "0" },
+      fetchImpl: world.fetch,
+      now: 1_000,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ stopped: "budget", stepsRun: 0 });
+    expect(world.openaiUrls).toEqual([]);
+  });
 });
 
 type Piece = {
@@ -246,15 +286,32 @@ type Piece = {
   fail?: boolean;
 };
 
-function requestFor(jobId: string, ownerId?: string): Request {
+function requestFor(jobId: string, ownerId?: string, token = "worker-secret"): Request {
   return new Request("https://memoai.local/api/notes/step", {
     method: "POST",
     headers: {
-      authorization: "Bearer worker-secret",
+      authorization: `Bearer ${token}`,
       "content-type": "application/json",
     },
     body: JSON.stringify({ jobId, ownerId }),
   });
+}
+
+function withAuth(world: ReturnType<typeof worldFor>): typeof fetch {
+  return async (url, init) => {
+    if (String(url).includes("/auth/v1/user")) {
+      const headers = init?.headers as Record<string, string>;
+      const token = headers.Authorization ?? "";
+      if (token.endsWith("user-a")) {
+        return Response.json({ id: "owner-a" });
+      }
+      if (token.endsWith("user-b")) {
+        return Response.json({ id: "owner-b" });
+      }
+      return new Response("no", { status: 401 });
+    }
+    return world.fetch(url, init);
+  };
 }
 
 function worldFor(pieces: Piece[], options: { consent?: boolean } = {}) {

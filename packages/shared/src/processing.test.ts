@@ -12,6 +12,7 @@ import {
   interpretUploadError,
   markRequestSent,
   pathOwnedBy,
+  notesStartRequest,
   planUpload,
   runSectionUploads,
   settleStep,
@@ -287,8 +288,8 @@ describe("legacy single files", () => {
     });
     expect(blocked.action).toBe("blocked");
     if (blocked.action === "blocked") {
-      expect(blocked.detail).toMatch(/25 MB/);
-      expect(blocked.detail).toMatch(/not cut, replace, or delete/);
+      expect(blocked.detail).toMatch(/20 MiB/);
+      expect(blocked.detail).toMatch(/not changed or deleted/);
       expect(blocked.writes).toEqual([]);
       expect(blocked.sourcePath).toBe("/data/recording.m4a");
     }
@@ -298,6 +299,13 @@ describe("legacy single files", () => {
       ownerId: "a",
       consentAt: "t",
       sections: [section(0, { sizeBytes: 25_000_001 })],
+      acknowledged: [],
+    })).toMatchObject({ reason: "section-too-large" });
+    expect(planUpload({
+      recordingId: "rec",
+      ownerId: "a",
+      consentAt: "t",
+      sections: [section(0, { sizeBytes: 0 })],
       acknowledged: [],
     })).toMatchObject({ reason: "over-provider-bytes" });
   });
@@ -325,6 +333,20 @@ describe("legacy single files", () => {
       slices: [{ offset: 0, length: 2, independentlyDecodable: false }],
     });
     expect(unsafe.action).toBe("blocked");
+  });
+});
+
+describe("notes start request", () => {
+  it("uses the signed-in access token and does not accept a worker secret", () => {
+    const request = notesStartRequest({
+      apiUrl: "https://notes.example/",
+      accessToken: "user-access-token",
+      jobId: "job-1",
+    });
+    expect(request.url).toBe("https://notes.example/api/notes/step");
+    expect(request.headers.Authorization).toBe("Bearer user-access-token");
+    expect(request.body).toBe(JSON.stringify({ jobId: "job-1" }));
+    expect(JSON.stringify(request)).not.toMatch(/WORKER_SECRET|service_role/);
   });
 });
 

@@ -15,6 +15,7 @@
     "@memoai/shared": "*"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "^0.5.11",
     "vitest": "^3.2.4"
   }
 }

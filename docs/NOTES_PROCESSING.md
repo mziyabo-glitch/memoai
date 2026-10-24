@@ -1,57 +1,58 @@
 # Notes processing
 
-The worker transcribes one finished audio section per OpenAI request, then writes notes from the transcript text. A 90-minute recording is not sent as one audio file. This repository does not deploy the worker and does not call OpenAI.
+MemoAI stores finished audio in sections of at most 20 MiB. That is the private `memoai-audio` bucket limit and the `audio_sections` limit. OpenAI accepts up to 25 MB per transcription request, so a stored section fits in one request. A 90-minute recording is still many sections, not one upload.
+
+An older file larger than 20 MiB is not cut. The phone explains that the original stays where it is. A copy is made only for ranges the caller has already marked as independently decodable. This app does not invent those ranges for an m4a file.
 
 ## What is implemented
 
-- `POST /api/notes/step` loads the owner's job with the service role, checks consent, the 90-minute cap, and storage paths, then runs the section loop.
-- Each transcription request uses an `Idempotency-Key`. A timeout or HTTP 408, 409, 429, or 5xx is stored as uncertain and is not repeated.
-- A definite refusal (for example HTTP 400) can be retried up to three times.
-- Notes are grounded against the transcript. Owners and deadlines are kept only when those words are in the cited passage.
-- Deleting the job sets `deleted_at`. A result that arrives after that is not published.
-- An older single file larger than 25 MB is not cut. The phone explains that the original stays put. A copy is made only for ranges the caller has already marked as independently decodable audio. This app does not invent those ranges for an m4a file.
+- Sign-in is required before upload. Recording still works with no account.
+- `POST /api/notes/step` accepts the signed-in user's Supabase access token. It checks that the job belongs to that user. The phone has no worker secret and no service-role key.
+- The same route accepts `Authorization: Bearer <MEMOAI_WORKER_SECRET>` for a scheduler. That secret stays in the host dashboard.
+- Each section is one OpenAI call. The route stops before starting another section when less than 90 seconds remain of a 240 second budget (`MEMOAI_STEP_BUDGET_MS`). A call that already left and then times out is marked uncertain and is not repeated.
+- Deleting a job no longer has to null `summaries.user_id`. Migration `20261024151532_fix_summary_job_delete.sql` nulls only `job_id`. It is in git and was not applied to MemoAi by this change.
+- Paid processing stays off unless `MEMOAI_ALLOW_PROVIDER=1`.
 
 ## What is deployed
 
-Nothing in this change is deployed. CI does not apply SQL, start a worker, or set secrets.
+The MemoAi database and private bucket are already live. See `docs/SUPABASE_SETUP_STATUS.md`. No worker host was deployed. No server secrets were configured.
 
 ## What was verified live
 
-Nothing. Tests use mocked HTTP. No project was contacted and no audio was sent to OpenAI.
+The project host answers at `https://zgnzdjrnaznbpcrwsdai.supabase.co` (auth health without a key returns 401). This session could not run SQL there: the connected Supabase account can see a different project, and that project was not used. No audio was uploaded and no OpenAI request was made. Mobile sign-in is still unverified.
+
+Job deletion with a linked summary was executed in Postgres (PGlite), including the ownership check and the new `ON DELETE SET NULL (job_id)` statement.
 
 ## Secrets
 
-Do not commit these values. Do not put a service-role key or an OpenAI key in `EXPO_PUBLIC_` or `NEXT_PUBLIC_` variables.
+Do not commit these. Do not put a service-role key, an OpenAI key, or `MEMOAI_WORKER_SECRET` in `EXPO_PUBLIC_` or `NEXT_PUBLIC_` variables, in the app, or in logs.
 
-Phone, in an untracked `apps/mobile/.env`:
+Phone, untracked `apps/mobile/.env`:
 
-- `EXPO_PUBLIC_SUPABASE_URL`
-- `EXPO_PUBLIC_SUPABASE_ANON_KEY`
+- `EXPO_PUBLIC_SUPABASE_URL=https://zgnzdjrnaznbpcrwsdai.supabase.co`
+- `EXPO_PUBLIC_SUPABASE_ANON_KEY` from Project Settings → API → anon public
+- `EXPO_PUBLIC_NOTES_API_URL` only after the web app is deployed, for example `https://<your-host>`
 
-Worker host (Vercel project environment, or the machine that will call the route). Set them in that dashboard, not in git:
+Worker host dashboard (the machine or Vercel project that runs `apps/web`, not the phone):
 
-- `SUPABASE_URL` — Project Settings → API → Project URL
-- `SUPABASE_SERVICE_ROLE_KEY` — Project Settings → API → service_role secret
-- `OPENAI_API_KEY` — OpenAI dashboard API keys
-- `MEMOAI_WORKER_SECRET` — a long random string you choose. The phone does not get this.
-- `OPENAI_TRANSCRIBE_MODEL` — optional, default `gpt-transcribe`
-- `OPENAI_NOTES_MODEL` — optional, default `gpt-4.1-mini`
+- `SUPABASE_URL=https://zgnzdjrnaznbpcrwsdai.supabase.co`
+- `SUPABASE_SERVICE_ROLE_KEY` from Project Settings → API → service_role
+- `OPENAI_API_KEY` from the OpenAI dashboard, when a paid run is intended
+- `MEMOAI_WORKER_SECRET` a long random string you choose
+- `MEMOAI_STEP_BUDGET_MS` optional, default 240000
+- `OPENAI_TRANSCRIBE_MODEL` optional, default `gpt-transcribe`
+- `OPENAI_NOTES_MODEL` optional, default `gpt-4.1-mini`
 
-Leave `MEMOAI_ALLOW_PROVIDER` unset. Set it to `1` only for a paid run you intend to make. Without it, the route returns 409 and does not call OpenAI.
+Leave `MEMOAI_ALLOW_PROVIDER` unset until you intend to pay for transcription. The route then returns 409 and does not call OpenAI.
 
 ## Database
 
-Apply these yourself, in order, in the Supabase SQL editor (or `supabase db push` when you choose). CI does not run them.
+Remote history already includes the phase 1 schema, the notes foundation, and the search-path hardening. Apply only `supabase/migrations/20261024151532_fix_summary_job_delete.sql`. Stop if a push wants to recreate the earlier files. Details are in `docs/SUPABASE_SETUP_STATUS.md`.
 
-1. `supabase/migrations/20261020225528_phase1_personal_schema.sql`
-2. `supabase/migrations/20261024105627_notes_processing_foundation.sql`
+## Worker host
 
-The second file creates the private `memoai-audio` bucket, processing tables, and owner RLS. Authenticated users can queue, cancel, and delete their own jobs. They cannot write rows as the worker. The service role does that.
+A long recording does not fit in one hosting invocation. Use a Node host for `apps/web` (Vercel or similar). The route's `maxDuration` is 300 seconds. The worker budget is 240 seconds so it can finish the section it already sent and leave the rest queued.
 
-## Run the worker
+The phone starts a job by posting its access token after a consented upload. A scheduler continues a queued job by posting the worker secret and `{ "jobId": "<processing_jobs.id>" }`. Put that scheduler in the host dashboard. Do not put the secret on the phone.
 
-Deploy the web app yourself when you want it reachable. This repo does not deploy it.
-
-The route is `POST /api/notes/step` with `Authorization: Bearer <MEMOAI_WORKER_SECRET>` and JSON `{ "jobId": "<processing_jobs.id>", "ownerId": "<auth user id>" }`. `ownerId` must match the job. The handler then transcribes each finished section and, after those transcripts exist, asks for notes. `maxDuration` is 300 seconds for hosts that honor it. If the host stops the process after a request was sent and the outcome is unknown, the next call pauses instead of sending that section again. Sections that were not sent can continue.
-
-Recording on the phone still works with no account. Upload still requires the existing consent screen and still skips recovery files.
+Nothing in this repo deploys that host or creates the scheduler.
