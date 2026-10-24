@@ -52,6 +52,30 @@ class MemoAiRecorderModule : Module() {
       RecorderController.list(requireContext())
     }
 
+    Function("listRecoveryFiles") {
+      synchronized(RecorderController.lock) { RecoveryFiles.list(requireContext()) }
+    }
+    Function("storageBytes") {
+      synchronized(RecorderController.lock) {
+        RecordingStore.directory(requireContext()).listFiles()?.filter { it.isFile }?.sumOf { it.length() } ?: 0L
+      }
+    }
+    AsyncFunction("recoverFile") { name: String ->
+      synchronized(RecorderController.lock) { RecoveryFiles.recover(requireContext(), name) }
+    }
+    AsyncFunction("exportRecoveryFile") { name: String ->
+      assertForeground()
+      synchronized(RecorderController.lock) { RecoveryFiles.export(requireContext(), name) }
+    }
+    AsyncFunction("deleteRecoveryFile") { name: String ->
+      assertForeground()
+      synchronized(RecorderController.lock) {
+        if (!RecoveryFiles.requireFile(requireContext(), name).delete()) {
+          throw RecorderException("Could not delete the recovery file")
+        }
+      }
+    }
+
     AsyncFunction("start") {
       val context = requireContext()
       assertForeground()

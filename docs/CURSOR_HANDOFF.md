@@ -1,25 +1,78 @@
-# Exact next Cursor Cloud Agent task
+# Segmented local recording: next acceptance task
 
-From your phone browser, open Cursor Cloud Agents, select mziyabo-glitch/memoai and the branch containing this follow-up. Paste the task below. Run one agent per branch. Review its draft PR in GitHub and bring that link to ChatGPT for review. The owner approves merges; agents do not merge. Do not paste secrets or private recordings into prompts or public PRs.
+The active work is feat/android-segmented-recovery, stacked on PR #4. It includes
+PR #2's privacy/backup commit without merging either existing PR. PR #4's preview
+at 38e8537 passed the user's Samsung update, playback, long-recording preservation,
+new recording, storage display, and force-stop/reopen checks. Those results do
+not apply to this new segmented implementation.
 
-## Paste into Cursor
+## Implemented for review
 
-Continue MemoAI from feat/foundation-recovery-contracts. If that branch and PR #1 have already been merged, start from main instead. Read AGENTS.md, README.md and docs/ARCHITECTURE.md. Create feat/android-durable-recovery. Open a draft PR against feat/foundation-recovery-contracts, or main if already merged. Do not push to main, merge PRs, replace the existing scaffold or add cloud features.
+New sessions use independently finalized AAC/M4A sections with a native
+45-second duration limit and a 19 MiB recorder size guard. Actual committed files
+must be no larger than 20 MiB. A native limit callback closes/releases the old
+recorder, validates its audio track/sample and duration, syncs bytes, renames the
+file, hashes it and commits the journal before starting the next section.
+Each section's intent is journaled before capture. No automatic capture begins
+on launch, process death or reboot. Stop and rotation share the controller lock;
+a queued callback after Stop cannot create another section. User Pause keeps
+ownership when audio focus returns.
 
-Implement durable local segmented recording and recovery in the existing Kotlin Expo module. Keep the public UI honest and preserve Pause/Resume, notification Stop, explicit foreground Start, current consent flow, system microphone indicators and START_NOT_STICKY. No automatic face-down starts or process-death microphone restart. Preserve existing transient audio-focus behavior for the live session and ensure a user pause never auto-resumes.
+One Library entry exposes the ordered saved sections. Playback advances through
+those sections; incomplete or missing sections are identified. Corrupt metadata
+and orphan/unfinished files are retained with explicit Recover, Export and
+confirmed Delete choices. Export opens the Android chooser only after a tap.
+Existing single-file JSON/M4A recordings remain in their original format and are
+read alongside the journal, without copying or deleting originals.
 
-Replace the fragile single-file recovery path with a native journal and short independently playable AAC/M4A segments, targeting 30–60 seconds and a maximum upload size of 20 MiB per segment. Measure rotation gaps; do not promise seamless capture without device evidence. Journal session intent before capture. Finalize each segment, validate playability, sync bytes, atomically rename, then commit its UUID, sequence, byte count and SHA-256. Use one authoritative journal with concurrency control and crash-safe writes. Migrate existing JSON/session files without deleting originals until verified.
+## Known limits
 
-On launch reconcile metadata, finalized files, partial files and orphan files. Preserve corrupt metadata and undecodable partial audio and show an explicit recovery/export/delete choice. Never report saved/recovered without validation. Repeated reconciliation must be idempotent. Wire the UI to native status on foreground/reconnect. Handle duplicate Start/Stop, storage-full failures, permission loss and Stop racing segment rotation. Keep Android backup disabled and inspect generated data-extraction/backup behavior; do not claim OEM transfer protection without evidence.
+Stop/start rotation can introduce gaps. rotationGapMs records callback processing
+and restart time; it is not a measurement of all lost audio, hardware latency or
+notification delay. Measure actual gaps with continuous spoken/counting audio.
+A crash can lose the current unfinished section. Delayed callbacks or OS kills
+mean no absolute 45-second loss guarantee. Demux validation is not a guarantee
+of successful decoding on every device. File sync/atomic replacement is not a
+power-loss guarantee for every filesystem/controller. No upload or AI is added.
+Android backup is disabled; OEM transfer behavior still requires device checks.
 
-Use Node 22.13+. Run npm ci, npm run lint, npm run typecheck, npm test, clean Expo Android prebuild, the existing merged-manifest check and Android Gradle compilation. Add meaningful native tests for crash points (before/after finalize, rename, journal commit), rotation/Stop races and legacy migration. Do not treat TypeScript state tests as native durability proof. Provide the exact EAS preview APK build command; it must contain the JavaScript bundle and work without Metro after installation. Do not invent EAS project IDs or signing credentials.
+## Validation to run
 
-Run hardware checks on a physical Android 14+ device, including Samsung if available: offline 30-minute face-down locked-screen recording, notification Stop, playback/duration/rotation-gap checks, incoming calls, pause/resume, process death, reboot, mic privacy toggle, permission revocation and full disk. Record build SHA, phone/OS, actual results and any data loss; do not attach private audio publicly. If no phone is available, leave hardware checks explicitly pending and the PR draft. Summarize changes, checks, limitations and the next step in language readable from a phone.
+Local validation on 2026-10-24: lint and TypeScript checks passed; all 19 shared
+tests passed; git diff --check passed. The new native recovery tests have not
+run yet. Android compilation, manifest checks and a new APK remain pending.
+The owner explicitly authorized uploading this feature branch to
+mziyabo-glitch/memoai and opening a draft PR. Merge approval remains separate.
 
-## After local recovery acceptance
+Use Node 22.13+. Run npm ci, npm run lint, npm run typecheck and npm test.
+Clean Expo Android prebuild; compile the recorder, merge/check the manifest,
+and run :memoai-recorder:testDebugUnitTest. The native tests inject filesystem
+crash points and recorder events; they do not record or decode real microphone
+audio. Keep the PR draft until hardware acceptance.
 
-1. Supabase Auth, secure token storage, separate upload/AI consent and private audio bucket with owner-isolation tests; resumable/idempotent uploads and object deletion.
-2. Authenticated enqueue endpoint and durable worker with server-only OpenAI transcription, validated summaries/actions, quotas, leases and safe retries.
-3. Authenticated Vercel dashboard for search, playback, export and deletion. Keep recording native.
+## Samsung acceptance (all pending for this phase)
 
-For phone acceptance use apps/mobile's existing EAS preview profile (`npx eas-cli build --platform android --profile preview`) after an authorized operator links the Expo project. A cloud-agent Metro server is unnecessary for the preview APK. Account linking/signing setup and physical testing still require the owner's environment.
+- Install the preview over the current app; never uninstall or clear data.
+- Verify the existing 1.5-hour recording and other old items still play.
+- Make a 3-minute recording: check ordered sections, total duration, storage,
+  automatic playback through all sections, Stop play, and repeat playback.
+- Record offline, locked and face down for 30 minutes. Use a continuous audible
+  counter to measure gaps at section boundaries. Record phone/OS/build SHA.
+- Pause/resume around 45 seconds; test transient audio focus and user Pause.
+- Stop in-app and from the notification at a boundary; repeat Stop quickly.
+- Force-stop after at least two sections, then reopen twice. Saved sections must
+  play; unfinished files must remain available with honest labels.
+- Reboot, revoke microphone/notification permissions, toggle mic privacy, and
+  test low/full disk using disposable recordings. Report loss and failure state.
+- Try Recover/Export/Delete on a disposable incomplete file; cancellation keeps it.
+- Verify backup and device-transfer behavior separately. Do not publish private audio.
+
+Build from a clean clone outside OneDrive to avoid read-only directory attributes
+in the upload archive. From apps/mobile use the existing linked Expo project and
+signing key: npx eas-cli build --platform android --profile preview.
+Inspect the archive first with eas build:inspect --stage archive. The preview
+includes JavaScript and does not need Metro. Do not change signing credentials.
+
+After acceptance: review remaining recovery issues, then plan separate upload
+consent, private owner-isolated storage and authenticated processing. Do not
+merge PRs or add cloud behavior without the owner's instruction.

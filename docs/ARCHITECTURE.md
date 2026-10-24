@@ -38,3 +38,6 @@ Vercel hosts the later authenticated Next.js dashboard for search, playback, exp
 - [Supabase Storage access control](https://supabase.com/docs/guides/storage/security/access-control)
 - [OpenAI file transcription](https://developers.openai.com/api/docs/guides/speech-to-text)
 - [Cursor Cloud Agents](https://cursor.com/docs/cloud-agent)
+
+## Segmented recording implementation
+See docs/CURSOR_HANDOFF.md for the new per-session journal, 45-second native sections, legacy compatibility, recovery UI, and pending hardware checks. Prior single-file acceptance is not evidence for segmented capture.
