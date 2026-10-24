@@ -16,6 +16,8 @@ import {
   runSectionUploads,
   settleStep,
   shouldPublish,
+  splitWithoutTouchingSource,
+  transcriptTimeline,
   type ProcessJob,
   type SectionInput,
 } from "./processing";
@@ -271,5 +273,82 @@ describe("processing jobs", () => {
     expect(processing.phase).toBe("processing");
     const cancelled = describeCloud({ signedIn: true, consented: true, upload: null, job: cancelJob(jobFor()) });
     expect(cancelled.phase).toBe("cancelled");
+  });
+});
+
+describe("legacy single files", () => {
+  it("blocks a file over the provider limit and does not change the original bytes", () => {
+    const source = new Uint8Array([9, 8, 7, 6, 5]);
+    const before = source.slice();
+    const blocked = splitWithoutTouchingSource({
+      source,
+      sourcePath: "/data/recording.m4a",
+      slices: null,
+    });
+    expect(blocked.action).toBe("blocked");
+    if (blocked.action === "blocked") {
+      expect(blocked.detail).toMatch(/25 MB/);
+      expect(blocked.detail).toMatch(/not cut, replace, or delete/);
+      expect(blocked.writes).toEqual([]);
+      expect(blocked.sourcePath).toBe("/data/recording.m4a");
+    }
+    expect(Array.from(source)).toEqual(Array.from(before));
+    expect(planUpload({
+      recordingId: "rec",
+      ownerId: "a",
+      consentAt: "t",
+      sections: [section(0, { sizeBytes: 25_000_001 })],
+      acknowledged: [],
+    })).toMatchObject({ reason: "over-provider-bytes" });
+  });
+
+  it("copies only independently decodable ranges into new buffers", () => {
+    const source = new Uint8Array([1, 2, 3, 4, 5, 6]);
+    const split = splitWithoutTouchingSource({
+      source,
+      sourcePath: "/data/recording.m4a",
+      slices: [
+        { offset: 0, length: 2, independentlyDecodable: true },
+        { offset: 3, length: 2, independentlyDecodable: true },
+      ],
+    });
+    expect(split.action).toBe("split");
+    if (split.action !== "split") return;
+    expect(split.writes).toEqual([]);
+    expect(Array.from(split.copies[0])).toEqual([1, 2]);
+    expect(Array.from(split.copies[1])).toEqual([4, 5]);
+    split.copies[0][0] = 99;
+    expect(source[0]).toBe(1);
+    const unsafe = splitWithoutTouchingSource({
+      source,
+      sourcePath: "/data/recording.m4a",
+      slices: [{ offset: 0, length: 2, independentlyDecodable: false }],
+    });
+    expect(unsafe.action).toBe("blocked");
+  });
+});
+
+describe("transcript timeline", () => {
+  it("offsets the second section by the first section's duration", () => {
+    let job = jobFor([
+      section(0, { durationMs: 45_000 }),
+      section(1, { durationMs: 30_000 }),
+    ]);
+    for (const [sequence, text, startMs] of [
+      [0, "Hello there", 1_500],
+      [1, "Next point", 2_000],
+    ] as const) {
+      const claimed = claimStep(job, { actorOwnerId: "owner-a", workerId: "w", now: sequence, leaseMs: 1_000 });
+      if (!claimed.ok) throw new Error(claimed.reason);
+      job = settleStep(markRequestSent(claimed.job, claimed.step.idempotencyKey, sequence), claimed.step.idempotencyKey, {
+        kind: "text",
+        text,
+        segments: [{ text, startMs, endMs: startMs + 1_000 }],
+      }).job;
+    }
+    expect(transcriptTimeline(job).map((passage) => ({ id: passage.id, startMs: passage.startMs, text: passage.text }))).toEqual([
+      { id: "section-0-0", startMs: 1_500, text: "Hello there" },
+      { id: "section-1-0", startMs: 47_000, text: "Next point" },
+    ]);
   });
 });

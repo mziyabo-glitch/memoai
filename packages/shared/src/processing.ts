@@ -5,7 +5,13 @@
  * sent as one audio file.
  */
 
-import { MAX_NOTES_AUDIO_MS, groundNotes, type GroundedNotes, type NotesDraft } from "./notes";
+import {
+  MAX_NOTES_AUDIO_MS,
+  groundNotes,
+  type GroundedNotes,
+  type NotesDraft,
+  type NotesPassage,
+} from "./notes";
 
 /** OpenAI transcription requests accept files up to 25 MB. */
 export const OPENAI_MAX_AUDIO_BYTES = 25_000_000;
@@ -60,6 +66,13 @@ export type StepPhase =
   | "uncertain"
   | "unusable";
 
+/** Times are relative to the start of one audio section. */
+export type TimedSnippet = {
+  text: string;
+  startMs: number;
+  endMs: number;
+};
+
 export type ProcessStep = {
   operation: "transcribe" | "notes";
   sequence: number | null;
@@ -72,7 +85,18 @@ export type ProcessStep = {
   requestSent: boolean;
   attempts: number;
   transcript: string | null;
+  segments: TimedSnippet[] | null;
 };
+
+export type AudioSlice = {
+  offset: number;
+  length: number;
+  /** True only when this range is a complete, independently decodable audio file. */
+  independentlyDecodable: boolean;
+};
+
+export const OVERSIZED_SINGLE_FILE_DETAIL =
+  "This recording is one file larger than 25 MB, the maximum for one transcription request. MemoAI did not cut, replace, or delete the original file. Recordings from the current app are already stored as ordered sections under 20 MiB, and those can be uploaded. This older file stays on the phone.";
 
 export type ProcessJob = {
   id: string;
@@ -128,10 +152,13 @@ export function planUpload(input: {
   if (finished.some((section) => !HASH.test(section.sha256))) {
     return { ok: false, reason: "missing-hash" };
   }
+  if (finished.some((section) => section.sizeBytes > OPENAI_MAX_AUDIO_BYTES)) {
+    return { ok: false, reason: "over-provider-bytes" };
+  }
   if (finished.some((section) => section.sizeBytes > MAX_SECTION_BYTES)) {
     return { ok: false, reason: "section-too-large" };
   }
-  if (finished.some((section) => section.sizeBytes > OPENAI_MAX_AUDIO_BYTES || section.sizeBytes <= 0)) {
+  if (finished.some((section) => section.sizeBytes <= 0)) {
     return { ok: false, reason: "over-provider-bytes" };
   }
   const durationMs = finished.reduce((sum, section) => sum + section.durationMs, 0);
@@ -180,6 +207,55 @@ export async function runSectionUploads(input: {
     acknowledged.push({ sequence: section.sequence, sha256: section.sha256 });
   }
   return { acknowledged, status: "complete" };
+}
+
+/**
+ * Copies only ranges the caller has already marked as independently decodable.
+ * A single m4a/mp4 file has no such ranges here, so it is blocked.
+ * The returned plan never includes a path to write, and it does not mutate `source`.
+ */
+export function splitWithoutTouchingSource(input: {
+  source: Uint8Array;
+  sourcePath: string;
+  slices: readonly AudioSlice[] | null;
+}):
+  | { action: "blocked"; detail: string; sourcePath: string; writes: readonly [] }
+  | { action: "split"; copies: Uint8Array[]; sourcePath: string; writes: readonly [] } {
+  const blocked = {
+    action: "blocked" as const,
+    detail: OVERSIZED_SINGLE_FILE_DETAIL,
+    sourcePath: input.sourcePath,
+    writes: [] as const,
+  };
+  if (!input.slices || input.slices.length === 0 || input.slices.some((slice) => !slice.independentlyDecodable)) {
+    return blocked;
+  }
+  const ordered = input.slices.map((slice) => ({ ...slice })).sort((left, right) => left.offset - right.offset);
+  let cursor = 0;
+  for (const slice of ordered) {
+    if (
+      !Number.isInteger(slice.offset) ||
+      !Number.isInteger(slice.length) ||
+      slice.offset < 0 ||
+      slice.length <= 0 ||
+      slice.length > OPENAI_MAX_AUDIO_BYTES ||
+      slice.offset < cursor ||
+      slice.offset + slice.length > input.source.byteLength
+    ) {
+      return blocked;
+    }
+    cursor = slice.offset + slice.length;
+  }
+  return {
+    action: "split",
+    copies: ordered.map((slice) => {
+      const copy = new Uint8Array(slice.length);
+      copy.set(input.source.subarray(slice.offset, slice.offset + slice.length));
+      return copy;
+    }),
+    sourcePath: input.sourcePath,
+    writes: [],
+  };
 }
 
 export function interpretUploadError(message: string): "acknowledged" | "interrupted" {
@@ -265,6 +341,7 @@ export function createJob(input: {
     requestSent: false,
     attempts: 0,
     transcript: null,
+    segments: null,
   }));
   steps.push({
     operation: "notes",
@@ -278,6 +355,7 @@ export function createJob(input: {
     requestSent: false,
     attempts: 0,
     transcript: null,
+    segments: null,
   });
   return {
     ok: true,
@@ -379,7 +457,7 @@ export function markRequestSent(job: ProcessJob, idempotencyKey: string, now: nu
 }
 
 export type StepSettlement =
-  | { kind: "text"; text: string }
+  | { kind: "text"; text: string; segments?: TimedSnippet[] }
   | { kind: "notes"; draft: NotesDraft }
   | { kind: "rejected"; reason: string }
   | { kind: "uncertain" }
@@ -430,13 +508,14 @@ export function settleStep(
       ...current,
       phase: "succeeded",
       transcript: outcome.text,
+      segments: outcome.segments ?? null,
       leaseOwner: null,
       leaseUntil: null,
       requestSent: true,
     };
     return { published: true, job: replaceStep(job, step) };
   }
-  const passages = passagesFromTranscripts(job);
+  const passages = transcriptTimeline(job);
   const grounded = groundNotes({ ...outcome.draft, passages, source: "recording" });
   const step: ProcessStep = {
     ...current,
@@ -614,20 +693,55 @@ function sweepExpiredLeases(job: ProcessJob, now: number): ProcessJob {
   };
 }
 
-function passagesFromTranscripts(job: ProcessJob): NotesDraft["passages"] {
+/** Places each section's snippets on one timeline. Later sections start after earlier section durations. */
+export function transcriptTimeline(job: ProcessJob): NotesPassage[] {
+  const steps = job.steps
+    .filter((step) => step.operation === "transcribe")
+    .slice()
+    .sort((left, right) => (left.sequence ?? 0) - (right.sequence ?? 0));
   let cursor = 0;
-  return job.steps
-    .filter((step) => step.operation === "transcribe" && step.phase === "succeeded" && step.transcript)
-    .map((step) => {
-      const startMs = cursor;
-      cursor += step.durationMs;
-      return {
+  const passages: NotesPassage[] = [];
+  for (const step of steps) {
+    const duration = Number.isFinite(step.durationMs) && step.durationMs > 0 ? step.durationMs : 0;
+    if (step.phase === "succeeded" && step.segments && step.segments.length > 0) {
+      step.segments.forEach((segment, index) => {
+        const text = segment.text.trim();
+        if (!text) {
+          return;
+        }
+        const start = clampMs(segment.startMs, 0, duration);
+        const end = clampMs(segment.endMs, start, duration);
+        passages.push({
+          id: `section-${step.sequence}-${index}`,
+          startMs: cursor + start,
+          endMs: cursor + end,
+          text,
+        });
+      });
+    } else if (step.phase === "succeeded" && step.transcript && step.transcript.trim()) {
+      passages.push({
         id: `section-${step.sequence}`,
-        startMs,
-        endMs: cursor,
-        text: step.transcript as string,
-      };
-    });
+        startMs: cursor,
+        endMs: cursor + duration,
+        text: step.transcript,
+      });
+    }
+    cursor += duration;
+  }
+  return passages;
+}
+
+export function formatTranscriptForNotes(job: ProcessJob): string {
+  return transcriptTimeline(job)
+    .map((passage) => `[${passage.id} ${passage.startMs}ms-${passage.endMs}ms] ${passage.text}`)
+    .join("\n");
+}
+
+function clampMs(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.min(Math.max(value, min), max);
 }
 
 function replaceStep(job: ProcessJob, step: ProcessStep): ProcessJob {

@@ -1,3 +1,7 @@
+# Notes worker
+
+`POST /api/notes/step` runs the section-by-section OpenAI worker. A 90-minute recording is still not one audio request. An older file over 25 MB is blocked and the original is not changed. Nothing here is deployed, and no live provider call has been made. Setup is in docs/NOTES_PROCESSING.md. Do not apply SQL from CI.
+
 # Notes processing foundation
 
 Branched from the sample-notes tip `cursor/ai-notes-sample-flow-2f69` (`7e9b06a`, draft PR #6). The worker transcribes one finished audio section per step because OpenAI accepts about 25 MB per request and a 90-minute recording does not fit in one call. Ordered sections from PR #5 are the chunks. A notes call uses the transcript text only after every section has a result. No live paid run is included. See docs/NOTES_PROCESSING.md. Do not apply the new SQL from CI.

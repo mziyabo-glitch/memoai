@@ -1,10 +1,12 @@
 import {
   NOTES_UPLOAD_EXPLANATION,
+  OVERSIZED_SINGLE_FILE_DETAIL,
   audioObjectPath,
   createJob,
   interpretUploadError,
   planUpload,
   runSectionUploads,
+  splitWithoutTouchingSource,
   type AcknowledgedSection,
   type ProcessJob,
   type SectionInput,
@@ -248,9 +250,15 @@ function reasonText(reason: string): string {
     case "missing-hash":
       return "This recording has no section hash yet, so it was not uploaded.";
     case "section-too-large":
-      return "A section is larger than 20 MiB, so it was not uploaded.";
-    case "over-provider-bytes":
-      return "A section is larger than one transcription request allows, so it was not uploaded.";
+      return "A finished section is larger than 20 MiB. The original file was not changed or deleted, and it was not uploaded.";
+    case "over-provider-bytes": {
+      const decision = splitWithoutTouchingSource({
+        source: new Uint8Array(),
+        sourcePath: "recording",
+        slices: null,
+      });
+      return decision.action === "blocked" ? decision.detail : OVERSIZED_SINGLE_FILE_DETAIL;
+    }
     default:
       return "The upload did not start.";
   }

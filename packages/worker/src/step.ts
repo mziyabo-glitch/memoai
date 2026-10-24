@@ -1,5 +1,6 @@
 import {
   claimStep,
+  formatTranscriptForNotes,
   markRequestSent,
   settleStep,
   type ProcessJob,
@@ -17,8 +18,8 @@ export async function runOneStep(input: {
   workerId: string;
   now: number;
   leaseMs: number;
-  reload: () => ProcessJob;
-  save: (job: ProcessJob) => void;
+  reload: () => ProcessJob | Promise<ProcessJob>;
+  save: (job: ProcessJob) => void | Promise<void>;
   readAudio: (sha256: string) => Promise<Uint8Array | null>;
   sha256: (bytes: Uint8Array) => string;
   transcribe: (step: { idempotencyKey: string; model: string; bytes: Uint8Array }) => Promise<ProviderOutcome>;
@@ -31,11 +32,11 @@ export async function runOneStep(input: {
     leaseMs: input.leaseMs,
   });
   if (!claimed.ok) {
-    input.save(claimed.job);
+    await input.save(claimed.job);
     return { job: claimed.job, action: claimed.reason };
   }
   const sent = markRequestSent(claimed.job, claimed.step.idempotencyKey, input.now);
-  input.save(sent);
+  await input.save(sent);
   let outcome: ProviderOutcome;
   if (claimed.step.operation === "transcribe") {
     const bytes = await input.readAudio(claimed.step.sha256 ?? "");
@@ -43,25 +44,30 @@ export async function runOneStep(input: {
     if (!bytes || digest !== claimed.step.sha256) {
       outcome = { kind: "rejected", reason: "Audio hash did not match the acknowledged section." };
     } else {
-      outcome = await input.transcribe({
-        idempotencyKey: claimed.step.idempotencyKey,
-        model: input.job.transcribeModel,
-        bytes,
-      });
+      try {
+        outcome = await input.transcribe({
+          idempotencyKey: claimed.step.idempotencyKey,
+          model: input.job.transcribeModel,
+          bytes,
+        });
+      } catch {
+        outcome = { kind: "uncertain" };
+      }
     }
   } else {
-    const transcript = sent.steps
-      .filter((step) => step.operation === "transcribe" && step.transcript)
-      .map((step) => step.transcript)
-      .join("\n");
-    outcome = await input.writeNotes({
-      idempotencyKey: claimed.step.idempotencyKey,
-      model: input.job.notesModel,
-      transcript,
-    });
+    const transcript = formatTranscriptForNotes(sent);
+    try {
+      outcome = await input.writeNotes({
+        idempotencyKey: claimed.step.idempotencyKey,
+        model: input.job.notesModel,
+        transcript,
+      });
+    } catch {
+      outcome = { kind: "uncertain" };
+    }
   }
-  const latest = input.reload();
+  const latest = await input.reload();
   const settled = settleStep(latest, claimed.step.idempotencyKey, outcome);
-  input.save(settled.job);
+  await input.save(settled.job);
   return { job: settled.job, action: settled.published ? "published" : "withheld" };
 }

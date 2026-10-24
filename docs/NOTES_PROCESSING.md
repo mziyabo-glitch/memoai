@@ -1,50 +1,57 @@
 # Notes processing
 
-This is the server-side foundation. It does not call OpenAI during tests or CI.
+The worker transcribes one finished audio section per OpenAI request, then writes notes from the transcript text. A 90-minute recording is not sent as one audio file. This repository does not deploy the worker and does not call OpenAI.
 
-## Why one section at a time
+## What is implemented
 
-OpenAI's transcription endpoint accepts a file up to 25 MB. A 90-minute recording is larger than that and is already stored as ordered AAC sections of about 45 seconds, each at most 20 MiB. The worker transcribes one finished section per invocation, then writes the summary from the transcript text. It does not send the whole recording in one audio request. A section step fits a short serverless invocation. The recording is finished by repeating the step, not by holding one long request open.
+- `POST /api/notes/step` loads the owner's job with the service role, checks consent, the 90-minute cap, and storage paths, then runs the section loop.
+- Each transcription request uses an `Idempotency-Key`. A timeout or HTTP 408, 409, 429, or 5xx is stored as uncertain and is not repeated.
+- A definite refusal (for example HTTP 400) can be retried up to three times.
+- Notes are grounded against the transcript. Owners and deadlines are kept only when those words are in the cited passage.
+- Deleting the job sets `deleted_at`. A result that arrives after that is not published.
+- An older single file larger than 25 MB is not cut. The phone explains that the original stays put. A copy is made only for ranges the caller has already marked as independently decodable audio. This app does not invent those ranges for an m4a file.
 
-Uncertain provider timeouts are not retried automatically. A definite rejection, such as a file the provider refused before accepting it, can be retried up to three times. A completed result for the same owner, section hashes, and models is reused.
+## What is deployed
 
-## What you set, and where
+Nothing in this change is deployed. CI does not apply SQL, start a worker, or set secrets.
 
-Do not commit these values.
+## What was verified live
 
-Phone or dev client, in `apps/mobile/.env`:
+Nothing. Tests use mocked HTTP. No project was contacted and no audio was sent to OpenAI.
+
+## Secrets
+
+Do not commit these values. Do not put a service-role key or an OpenAI key in `EXPO_PUBLIC_` or `NEXT_PUBLIC_` variables.
+
+Phone, in an untracked `apps/mobile/.env`:
 
 - `EXPO_PUBLIC_SUPABASE_URL`
 - `EXPO_PUBLIC_SUPABASE_ANON_KEY`
 
-Web, in `apps/web/.env.local`, only if the site needs the anon key:
+Worker host (Vercel project environment, or the machine that will call the route). Set them in that dashboard, not in git:
 
-- `NEXT_PUBLIC_SUPABASE_URL`
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `SUPABASE_URL` — Project Settings → API → Project URL
+- `SUPABASE_SERVICE_ROLE_KEY` — Project Settings → API → service_role secret
+- `OPENAI_API_KEY` — OpenAI dashboard API keys
+- `MEMOAI_WORKER_SECRET` — a long random string you choose. The phone does not get this.
+- `OPENAI_TRANSCRIBE_MODEL` — optional, default `gpt-transcribe`
+- `OPENAI_NOTES_MODEL` — optional, default `gpt-4.1-mini`
 
-Worker host dashboard (Vercel project env, or the machine that runs the step). These must not use an `EXPO_PUBLIC_` or `NEXT_PUBLIC_` name:
-
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `OPENAI_API_KEY`
-- `MEMOAI_WORKER_SECRET`
-- `OPENAI_TRANSCRIBE_MODEL` optional, default `gpt-transcribe`
-- `OPENAI_NOTES_MODEL` optional, default `gpt-4.1-mini`
-
-Leave `MEMOAI_ALLOW_PROVIDER` unset. Set it to `1` only when you intend a paid call. The step route still refuses to start that call from this deployment.
+Leave `MEMOAI_ALLOW_PROVIDER` unset. Set it to `1` only for a paid run you intend to make. Without it, the route returns 409 and does not call OpenAI.
 
 ## Database
 
-Run the phase 1 migration first, then `supabase/migrations/20261024105627_notes_processing_foundation.sql`, in the Supabase SQL editor or with `supabase db push` when you choose. Nothing in this repo applies it for you.
+Apply these yourself, in order, in the Supabase SQL editor (or `supabase db push` when you choose). CI does not run them.
 
-The `memoai-audio` bucket is private. Object paths start with the owner's user id. Authenticated users can upload and delete only their prefix. They can queue a job and cancel or delete it. They cannot mark a job completed or store a row as worker output. The service role does that.
+1. `supabase/migrations/20261020225528_phase1_personal_schema.sql`
+2. `supabase/migrations/20261024105627_notes_processing_foundation.sql`
 
-## Phone flow
+The second file creates the private `memoai-audio` bucket, processing tables, and owner RLS. Authenticated users can queue, cancel, and delete their own jobs. They cannot write rows as the worker. The service role does that.
 
-Recording still works signed out. Create notes explains the upload. Agreeing stores permission on the phone. Upload finished audio is available after sign-in and that agreement. Recovery files are not uploaded. Acknowledged sections are not sent again. Delete uploaded audio removes the objects and blocks a later result from being saved.
+## Run the worker
 
-Sample notes stay in the development Samples section and are refused by the upload planner.
+Deploy the web app yourself when you want it reachable. This repo does not deploy it.
 
-## Checked here
+The route is `POST /api/notes/step` with `Authorization: Bearer <MEMOAI_WORKER_SECRET>` and JSON `{ "jobId": "<processing_jobs.id>", "ownerId": "<auth user id>" }`. `ownerId` must match the job. The handler then transcribes each finished section and, after those transcripts exist, asks for notes. `maxDuration` is 300 seconds for hosts that honor it. If the host stops the process after a request was sent and the outcome is unknown, the next call pauses instead of sending that section again. Sections that were not sent can continue.
 
-Unit tests cover ownership, consent, the 90-minute cap, section retries, uncertain timeouts, reuse, and deletion. They use a fake provider. No audio was sent to OpenAI.
+Recording on the phone still works with no account. Upload still requires the existing consent screen and still skips recovery files.

@@ -36,6 +36,7 @@ export {
   MAX_SECTION_BYTES,
   NOTES_MODEL,
   OPENAI_MAX_AUDIO_BYTES,
+  OVERSIZED_SINGLE_FILE_DETAIL,
   TRANSCRIBE_MODEL,
   audioObjectPath,
   cancelJob,
@@ -44,6 +45,7 @@ export {
   deleteJob,
   describeCloud,
   findReusableJob,
+  formatTranscriptForNotes,
   interpretUploadError,
   markRequestSent,
   pathOwnedBy,
@@ -52,7 +54,9 @@ export {
   runSectionUploads,
   settleStep,
   shouldPublish,
+  splitWithoutTouchingSource,
   storagePaths,
+  transcriptTimeline,
 } from "./processing";
 
 export { SAMPLE_NOTE_DRAFTS } from "./sampleNotes";
@@ -60,11 +64,13 @@ export { SAMPLE_NOTE_DRAFTS } from "./sampleNotes";
 export type {
   AcknowledgedSection,
   CloudPhase,
+  AudioSlice,
   ProcessJob,
   ProcessStep,
   SectionInput,
   StepPhase,
   StepSettlement,
+  TimedSnippet,
   UploadBlockReason,
   UploadPlan,
 } from "./processing";

@@ -28,7 +28,7 @@ The phone records without a Supabase project. Use the dashboard when you want th
 4. Put them in `apps/mobile/.env` and `apps/web/.env.local` using the names in `.env.example`.
 5. When you want the cloud tables, paste `supabase/migrations/20261020225528_phase1_personal_schema.sql` and then `supabase/migrations/20261024105627_notes_processing_foundation.sql` into the dashboard SQL editor and run them yourself. This repo does not apply those migrations and does not connect with a real key. Setup for notes is in [docs/NOTES_PROCESSING.md](docs/NOTES_PROCESSING.md).
 
-Row level security is enabled. Each row is scoped by `user_id` to `auth.users`, and the policies allow select, insert, update, and delete only for that user. There is no transcription job in this phase.
+Row level security is enabled. Each row is scoped by `user_id` to `auth.users`, and the policies allow select, insert, update, and delete only for that user. The notes worker is implemented in this repo and is not deployed from CI. See [docs/NOTES_PROCESSING.md](docs/NOTES_PROCESSING.md).
 
 ## Connect EAS and install an APK
 
