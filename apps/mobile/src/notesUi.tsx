@@ -44,6 +44,12 @@ export function RecordingNotesScreen({
   playDisabled,
   playingPart,
   error,
+  cloudLabel,
+  cloudDetail,
+  onSignIn,
+  onUpload,
+  onCancelCloud,
+  onDeleteUpload,
 }: {
   title: string;
   onTitle: (next: string | null) => void;
@@ -59,13 +65,32 @@ export function RecordingNotesScreen({
   playDisabled: boolean;
   playingPart: number | null;
   error: string | null;
+  cloudLabel: string;
+  cloudDetail: string;
+  onSignIn: () => void;
+  onUpload: () => void;
+  onCancelCloud: () => void;
+  onDeleteUpload: () => void;
 }) {
   const [tab, setTab] = useState<NotesTab>("summary");
   return (
     <View style={styles.stack}>
       <BackButton onPress={onBack} />
       <TitleField title={title} onTitle={onTitle} label="Recording title" />
-      <Text style={styles.status}>{recordingNotesLabel(phase)}</Text>
+      <Text style={styles.status}>{cloudLabel || recordingNotesLabel(phase)}</Text>
+      <Text style={styles.body}>{cloudDetail}</Text>
+      {cloudLabel === "Sign in to create notes" ? (
+        <PrimaryButton label="Sign in" onPress={onSignIn} />
+      ) : null}
+      {cloudLabel === "Ready to upload" ? (
+        <PrimaryButton label="Upload finished audio" onPress={onUpload} />
+      ) : null}
+      {cloudLabel === "Uploading" || cloudLabel === "Processing" ? (
+        <SecondaryButton label="Cancel" onPress={onCancelCloud} />
+      ) : null}
+      {cloudLabel === "Notes ready" || cloudLabel === "Partial notes" || cloudLabel === "Notes failed" || cloudLabel === "Notes paused" || cloudLabel === "Upload interrupted" ? (
+        <SecondaryButton label="Delete uploaded audio" onPress={onDeleteUpload} />
+      ) : null}
       <Text style={styles.meta}>
         {dateLabel} · {durationLabel} · {sizeLabel}
       </Text>
@@ -256,6 +281,72 @@ export function SampleNotesScreen({
             ? "These notes cannot be shared."
             : "Sharing waits until the notes are complete."}
         </Text>
+      )}
+    </View>
+  );
+}
+
+export function AccountScreen({
+  configured,
+  email,
+  onBack,
+  onSignIn,
+  onCreateAccount,
+  onSignOut,
+  error,
+}: {
+  configured: boolean;
+  email: string | null;
+  onBack: () => void;
+  onSignIn: (email: string, password: string) => void;
+  onCreateAccount: (email: string, password: string) => void;
+  onSignOut: () => void;
+  error: string | null;
+}) {
+  const [address, setAddress] = useState("");
+  const [password, setPassword] = useState("");
+  return (
+    <View style={styles.stack}>
+      <BackButton onPress={onBack} />
+      <Text style={styles.heading}>Account</Text>
+      <Text style={styles.body}>
+        Recording works with no account. Sign in only when you want finished audio uploaded for notes.
+        The service-role key stays off this phone.
+      </Text>
+      {email ? <Text style={styles.status}>{email}</Text> : null}
+      {error ? <Text style={styles.error}>{error}</Text> : null}
+      {!configured ? (
+        <Text style={styles.body}>
+          Add EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY to the phone build.
+          No audio is uploaded until those are set and you agree.
+        </Text>
+      ) : email ? (
+        <SecondaryButton label="Sign out" onPress={onSignOut} />
+      ) : (
+        <View style={styles.stack}>
+          <TextInput
+            accessibilityLabel="Email"
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="email-address"
+            value={address}
+            onChangeText={setAddress}
+            placeholder="Email"
+            placeholderTextColor={theme.muted}
+            style={styles.titleInput}
+          />
+          <TextInput
+            accessibilityLabel="Password"
+            secureTextEntry
+            value={password}
+            onChangeText={setPassword}
+            placeholder="Password"
+            placeholderTextColor={theme.muted}
+            style={styles.titleInput}
+          />
+          <PrimaryButton label="Sign in" onPress={() => onSignIn(address.trim(), password)} />
+          <SecondaryButton label="Create account" onPress={() => onCreateAccount(address.trim(), password)} />
+        </View>
       )}
     </View>
   );

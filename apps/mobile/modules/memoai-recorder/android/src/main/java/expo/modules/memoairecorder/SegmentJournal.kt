@@ -40,6 +40,19 @@ internal class SegmentJournal(
   companion object {
     const val MAX_BYTES = 20L * 1024 * 1024
 
+    fun sha256(file: File): String {
+      val digest = MessageDigest.getInstance("SHA-256")
+      file.inputStream().use { input ->
+        val buffer = ByteArray(64 * 1024)
+        var count = input.read(buffer)
+        while (count >= 0) {
+          if (count > 0) digest.update(buffer, 0, count)
+          count = input.read(buffer)
+        }
+      }
+      return digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
     fun audioDuration(file: File): Long? {
       if (!file.isFile || file.length() == 0L) return null
       val extractor = MediaExtractor()
@@ -159,16 +172,5 @@ internal class SegmentJournal(
     return next
   }
 
-  private fun hash(file: File): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    file.inputStream().use { input ->
-      val buffer = ByteArray(64 * 1024)
-      var count = input.read(buffer)
-      while (count >= 0) {
-        if (count > 0) digest.update(buffer, 0, count)
-        count = input.read(buffer)
-      }
-    }
-    return digest.digest().joinToString("") { "%02x".format(it) }
-  }
+  private fun hash(file: File): String = sha256(file)
 }

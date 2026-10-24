@@ -1,6 +1,6 @@
 # MemoAI
 
-Android-first personal meeting recorder. Phase 1 records on the phone with a native microphone foreground service, keeps the file in app-specific storage, and does not need an account. A development build can show labelled sample notes. A saved recording can store permission for a later transcript on this phone. MemoAI does not upload audio, call a transcription service, or implement iOS.
+Android-first personal meeting recorder. Phase 1 records on the phone with a native microphone foreground service, keeps the file in app-specific storage, and does not need an account. A development build can show labelled sample notes. A saved recording can store permission for a later transcript on this phone. Sign-in is required before finished audio can be uploaded. MemoAI does not call a transcription service unless a server operator explicitly enables it, and it does not implement iOS.
 
 ## Layout
 
@@ -26,7 +26,7 @@ The phone records without a Supabase project. Use the dashboard when you want th
 2. Open **Project Settings → API**.
 3. Copy the project URL and the anon public key.
 4. Put them in `apps/mobile/.env` and `apps/web/.env.local` using the names in `.env.example`.
-5. When you want the cloud tables, paste `supabase/migrations/20261020225528_phase1_personal_schema.sql` into the dashboard SQL editor and run it yourself. This repo does not apply that migration and does not connect with a real key.
+5. When you want the cloud tables, paste `supabase/migrations/20261020225528_phase1_personal_schema.sql` and then `supabase/migrations/20261024105627_notes_processing_foundation.sql` into the dashboard SQL editor and run them yourself. This repo does not apply those migrations and does not connect with a real key. Setup for notes is in [docs/NOTES_PROCESSING.md](docs/NOTES_PROCESSING.md).
 
 Row level security is enabled. Each row is scoped by `user_id` to `auth.users`, and the policies allow select, insert, update, and delete only for that user. There is no transcription job in this phase.
 
