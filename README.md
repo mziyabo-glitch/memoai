@@ -1,6 +1,6 @@
 # MemoAI
 
-Android-first personal meeting recorder. Phase 1 records on the phone with a native microphone foreground service, keeps the file in app-specific storage, and does not need an account. It does not transcribe, summarize, upload, or implement iOS.
+Android-first personal meeting recorder. Phase 1 records on the phone with a native microphone foreground service, keeps the file in app-specific storage, and does not need an account. A development build can show labelled sample notes. A saved recording can store permission for a later transcript on this phone. MemoAI does not upload audio, call a transcription service, or implement iOS.
 
 ## Layout
 
@@ -134,7 +134,7 @@ A force-stop from the system can kill the process before `MediaRecorder.stop()` 
 
 ## Phase 1 does not include
 
-- AI transcription, summary generation, or action-item generation
-- Cloud upload
+- A connected transcription or summary provider. Sample notes are labelled and shown in development only. They are not results from a recording.
+- Cloud upload. Create notes explains what finished audio would leave the phone, then saves a yes on the phone. Nothing is sent.
 - iOS
 - An account requirement for recording

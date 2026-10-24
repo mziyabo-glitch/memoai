@@ -1,3 +1,11 @@
+# Notes screens on the segmented recorder
+
+The notes branch starts at the tip of `feat/android-segmented-recovery` (draft PR #5, `0a169fe`). That tip already contains the phase 1 recorder, crash-safe metadata, and ordered audio sections. PR #1 and PR #5 are not retargeted or merged.
+
+Development builds add a library search, editable titles, and labelled sample notes with Summary, Transcript, and Actions. Real recordings stay on the phone. Create notes explains an upload and stores explicit permission locally. No provider is called and no audio is uploaded. Release UI does not show the samples.
+
+Do not claim a phone test for the notes screens. The Samsung checks below are still pending for segmented capture. Do not connect a live provider until the processing plan in the notes pull request is accepted.
+
 # Segmented local recording: next acceptance task
 
 The active work is feat/android-segmented-recovery, stacked on PR #4. It includes
