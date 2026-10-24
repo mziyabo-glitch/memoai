@@ -5,8 +5,6 @@ import android.content.pm.PackageManager
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.MediaMetadataRetriever
-import android.media.MediaRecorder
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -33,6 +31,7 @@ internal enum class CaptureSignal {
   FOCUS_GAIN,
   PERMANENT_FOCUS_LOSS,
   CAPTURE_ERROR,
+  SEGMENT_LIMIT,
 }
 
 internal enum class TransientPauseResult {
@@ -58,26 +57,19 @@ internal enum class TransientResumeResult {
 internal object RecorderController {
   private const val TAG = "MemoAiRecorder"
   val lock = Any()
-
-  @Volatile var phase: Phase = Phase.IDLE
-  @Volatile var serviceAlive: Boolean = false
+  @Volatile var phase = Phase.IDLE
+  @Volatile var serviceAlive = false
   @Volatile var lastError: String? = null
-  @Volatile private var settledOp: Long = 0
-
-  var onStatus: ((Map<String, Any?>) -> Unit)? = null
-
-  private var requestedOp: Long = 0
+  @Volatile private var settledOp = 0L
+  private var requestedOp = 0L
   private var activeId: String? = null
-  private var activeFileName: String? = null
-  private var startedAtMs: Long = 0
-  private var accumulatedMs: Long = 0
-  private var segmentStartedAt: Long = 0
-  private var activePlayable: Boolean = false
-  private var activeCorrupt: Boolean = false
-  private var pausedByTransientFocus: Boolean = false
-  private var recorder: MediaRecorder? = null
+  private var accumulatedMs = 0L
+  private var segmentStartedAt = 0L
+  private var pausedByTransientFocus = false
+  private var capture: SegmentCapture? = null
   private var focusRequest: AudioFocusRequest? = null
   private var focusListener: AudioManager.OnAudioFocusChangeListener? = null
+  var onStatus: ((Map<String, Any?>) -> Unit)? = null
 
   fun hasPermissions(context: Context): Boolean {
     val mic = ContextCompat.checkSelfPermission(
@@ -99,437 +91,217 @@ internal object RecorderController {
     return true
   }
 
-  /** Next command. Clears a previous error so only this command's result counts. */
-  fun openOperation(): Long {
-    synchronized(lock) {
-      requestedOp += 1
+
+  fun openOperation(): Long = synchronized(lock) { lastError = null; ++requestedOp }
+  fun settle(op: Long) = synchronized(lock) { if (op > settledOp) settledOp = op }
+  fun failCommand(message: String) = synchronized(lock) { lastError = message }
+  fun rejectStart(message: String) = synchronized(lock) {
+    lastError = message
+    if (phase != Phase.RECORDING && phase != Phase.PAUSED) serviceAlive = false
+  }
+
+  fun beginCapture(context: Context, sessionId: String, onSignal: (CaptureSignal) -> Unit): StartOutcome = synchronized(lock) {
+    if (serviceAlive) {
+      lastError = "A recording is already in progress"
+      return StartOutcome.REJECTED
+    }
+    if (!requestAudioFocus(context, onSignal)) {
+      abandonFocusLocked(context)
+      lastError = "Audio focus was not granted"
+      return StartOutcome.REJECTED
+    }
+    val journal = journal(context)
+    val next = SegmentCapture(journal, SegmentSession(sessionId, System.currentTimeMillis()), { file ->
+      AndroidAudioPart(context, file,
+        { onSignal(CaptureSignal.SEGMENT_LIMIT) },
+        { onSignal(CaptureSignal.CAPTURE_ERROR) })
+    }, SystemClock::elapsedRealtime)
+    capture = next
+    activeId = sessionId
+    accumulatedMs = 0
+    pausedByTransientFocus = false
+    try {
+      next.start()
+      segmentStartedAt = SystemClock.elapsedRealtime()
+      phase = Phase.RECORDING
+      serviceAlive = true
       lastError = null
-      return requestedOp
-    }
-  }
-
-  fun settle(op: Long) {
-    if (op <= 0L) {
-      return
-    }
-    synchronized(lock) {
-      if (op > settledOp) {
-        settledOp = op
-      }
-    }
-  }
-
-  fun failCommand(message: String) {
-    synchronized(lock) {
-      lastError = message
-    }
-  }
-
-  /**
-   * A start that never began capture. Keeps an existing interrupted session
-   * and its file. Sets [lastError] so the waiting command fails.
-   */
-  fun rejectStart(message: String) {
-    synchronized(lock) {
-      lastError = message
-      if (phase == Phase.RECORDING || phase == Phase.PAUSED) {
-        return
-      }
+      StartOutcome.RECORDING
+    } catch (error: Exception) {
+      next.release()
+      phase = Phase.INTERRUPTED
       serviceAlive = false
-      if (phase != Phase.INTERRUPTED) {
-        phase = Phase.IDLE
-      }
+      lastError = error.message ?: "Recording could not start"
+      try { next.persist(phase.wire) } catch (_: Exception) { /* Startup reconciliation retains intent. */ }
+      abandonFocusLocked(context)
+      StartOutcome.INTERRUPTED
     }
   }
 
-  fun beginCapture(
-    context: Context,
-    sessionId: String,
-    onSignal: (CaptureSignal) -> Unit,
-  ): StartOutcome {
-    synchronized(lock) {
-      if (serviceAlive && (phase == Phase.RECORDING || phase == Phase.PAUSED)) {
-        lastError = "A recording is already in progress"
-        return StartOutcome.REJECTED
-      }
-      val fileName = "$sessionId.m4a"
-      val file = RecordingStore.fileFor(context, fileName)
-      val created = createRecorder(context)
-      var started = false
-      try {
-        if (!requestAudioFocus(context, onSignal)) {
-          releaseQuietly(created)
-          abandonFocusLocked(context)
-          lastError = "Audio focus was not granted"
-          serviceAlive = false
-          if (phase != Phase.INTERRUPTED) {
-            phase = Phase.IDLE
-          }
-          return StartOutcome.REJECTED
-        }
-        created.setAudioSource(MediaRecorder.AudioSource.MIC)
-        created.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-        created.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-        created.setAudioEncodingBitRate(128_000)
-        created.setAudioSamplingRate(44_100)
-        created.setAudioChannels(1)
-        created.setOutputFile(file.absolutePath)
-        created.setOnErrorListener { _, what, extra ->
-          Log.w(TAG, "MediaRecorder error $what/$extra")
-          onSignal(CaptureSignal.CAPTURE_ERROR)
-        }
-        created.prepare()
-        // Microphone capture starts only after the service has called
-        // startForeground. The service enforces that order.
-        created.start()
-        started = true
-        recorder = created
-        activeId = sessionId
-        activeFileName = fileName
-        startedAtMs = System.currentTimeMillis()
-        accumulatedMs = 0
+  fun pause(context: Context): Boolean = synchronized(lock) {
+    if (phase != Phase.RECORDING && phase != Phase.PAUSED) {
+      lastError = "Nothing is recording"; return false
+    }
+    try {
+      capture!!.pause()
+      if (phase == Phase.RECORDING) accumulatedMs += SystemClock.elapsedRealtime() - segmentStartedAt
+      pausedByTransientFocus = false
+      phase = Phase.PAUSED
+      capture!!.persist(phase.wire)
+      lastError = null
+      true
+    } catch (error: Exception) {
+      interrupt(context, error.message ?: "Pause failed")
+      false
+    }
+  }
+
+  fun pauseForTransientFocus(context: Context): TransientPauseResult = synchronized(lock) {
+    if (phase != Phase.RECORDING) return TransientPauseResult.ALREADY_HELD
+    if (!pause(context)) return TransientPauseResult.FAILED
+    pausedByTransientFocus = true
+    TransientPauseResult.PAUSED
+  }
+
+  fun resume(context: Context): Boolean = synchronized(lock) {
+    if (phase != Phase.PAUSED) { lastError = "Nothing is paused"; return false }
+    if (!hasPermissions(context)) {
+      interrupt(context, "Microphone or notification permission was revoked"); return false
+    }
+    try {
+      capture!!.resume()
+      segmentStartedAt = SystemClock.elapsedRealtime()
+      pausedByTransientFocus = false
+      phase = Phase.RECORDING
+      capture!!.persist(phase.wire)
+      lastError = null
+      true
+    } catch (error: Exception) {
+      interrupt(context, error.message ?: "Resume failed")
+      false
+    }
+  }
+
+  fun resumeAfterTransientFocus(context: Context): TransientResumeResult = synchronized(lock) {
+    if (!pausedByTransientFocus || phase != Phase.PAUSED) return TransientResumeResult.IGNORED
+    if (resume(context)) TransientResumeResult.RESUMED else TransientResumeResult.FAILED
+  }
+
+  fun rotate(context: Context): Boolean = synchronized(lock) {
+    if (!serviceAlive || (phase != Phase.RECORDING && phase != Phase.PAUSED)) return false
+    if (!hasPermissions(context)) {
+      interrupt(context, "Microphone or notification permission was revoked"); return false
+    }
+    try {
+      if (capture?.rotate() == true) {
+        accumulatedMs = capture!!.session.durationMs
         segmentStartedAt = SystemClock.elapsedRealtime()
-        activePlayable = false
-        activeCorrupt = false
-        pausedByTransientFocus = false
-        phase = Phase.RECORDING
-        serviceAlive = true
-        lastError = null
-        persistLocked(context)
-        Log.i(TAG, "capture started")
-        return StartOutcome.RECORDING
-      } catch (error: Exception) {
-        Log.e(TAG, "capture failed", error)
-        var finalized = false
-        if (started) {
-          try {
-            created.stop()
-            finalized = true
-          } catch (stopError: RuntimeException) {
-            Log.w(TAG, "MediaRecorder.stop failed", stopError)
-          }
-        }
-        releaseQuietly(created)
-        recorder = null
-        abandonFocusLocked(context)
-        serviceAlive = false
-        pausedByTransientFocus = false
-        if (file.exists() && file.length() > 0L) {
-          activeId = sessionId
-          activeFileName = fileName
-          startedAtMs = System.currentTimeMillis()
-          accumulatedMs = 0
-          val playable = finalized && mediaLooksPlayable(file)
-          activePlayable = playable
-          activeCorrupt = !playable
-          phase = Phase.INTERRUPTED
-          lastError = error.message ?: "Microphone capture failed"
-          persistLocked(context)
-          return StartOutcome.INTERRUPTED
-        }
-        deleteIfEmpty(file)
-        lastError = error.message ?: "Microphone capture failed"
-        if (phase != Phase.INTERRUPTED) {
-          phase = Phase.IDLE
-        }
-        return StartOutcome.REJECTED
       }
+      true
+    } catch (error: Exception) {
+      interrupt(context, error.message ?: "Could not save the next audio section")
+      false
     }
   }
 
-  fun pause(context: Context): Boolean {
-    synchronized(lock) {
-      val current = recorder
-      if (phase == Phase.PAUSED && current != null) {
-        // Already paused, including a transient-focus pause. The user now
-        // owns the pause, so a later focus gain must not resume capture.
-        pausedByTransientFocus = false
-        lastError = null
-        persistLocked(context)
-        return true
-      }
-      if (phase != Phase.RECORDING || current == null) {
-        lastError = "Nothing is recording"
-        return false
-      }
-      try {
-        current.pause()
-      } catch (error: RuntimeException) {
-        Log.w(TAG, "MediaRecorder.pause failed", error)
-        lastError = "Pause failed"
-        return false
-      }
-      accumulatedMs += SystemClock.elapsedRealtime() - segmentStartedAt
-      pausedByTransientFocus = false
-      phase = Phase.PAUSED
-      serviceAlive = true
-      lastError = null
-      persistLocked(context)
-      Log.i(TAG, "paused at $accumulatedMs")
-      return true
-    }
+  fun stop(context: Context): Boolean = synchronized(lock) {
+    if (phase == Phase.STOPPED) { lastError = null; return true }
+    if (phase == Phase.INTERRUPTED) return false
+    if (!serviceAlive) { lastError = "Nothing is recording"; return false }
+    finish(context, null)
+    phase == Phase.STOPPED
   }
 
-  /**
-   * Another app took audio briefly. Pause capture and keep this session.
-   * A pause the user already requested is left alone, so focus returning
-   * does not resume it.
-   */
-  fun pauseForTransientFocus(context: Context): TransientPauseResult {
-    synchronized(lock) {
-      val current = recorder
-      if (phase != Phase.RECORDING || current == null) {
-        return TransientPauseResult.ALREADY_HELD
-      }
-      try {
-        current.pause()
-      } catch (error: RuntimeException) {
-        Log.w(TAG, "MediaRecorder.pause failed during focus loss", error)
-        return TransientPauseResult.FAILED
-      }
-      accumulatedMs += SystemClock.elapsedRealtime() - segmentStartedAt
-      pausedByTransientFocus = true
-      phase = Phase.PAUSED
-      serviceAlive = true
-      lastError = null
-      persistLocked(context)
-      Log.i(TAG, "paused for transient audio focus at $accumulatedMs")
-      return TransientPauseResult.PAUSED
-    }
+  fun interrupt(context: Context, reason: String) = synchronized(lock) {
+    if (serviceAlive || phase == Phase.RECORDING || phase == Phase.PAUSED) finish(context, reason)
   }
 
-  fun resume(context: Context): Boolean {
-    synchronized(lock) {
-      val current = recorder
-      if (phase != Phase.PAUSED || current == null) {
-        lastError = "Nothing is paused"
-        return false
-      }
-      try {
-        current.resume()
-      } catch (error: RuntimeException) {
-        Log.w(TAG, "MediaRecorder.resume failed", error)
-        lastError = "Resume failed"
-        return false
-      }
-      pausedByTransientFocus = false
-      segmentStartedAt = SystemClock.elapsedRealtime()
-      phase = Phase.RECORDING
-      serviceAlive = true
-      lastError = null
-      persistLocked(context)
-      Log.i(TAG, "resumed")
-      return true
-    }
-  }
-
-  /** Resume only the pause this controller took for transient focus loss. */
-  fun resumeAfterTransientFocus(context: Context): TransientResumeResult {
-    synchronized(lock) {
-      val current = recorder
-      if (!pausedByTransientFocus || phase != Phase.PAUSED || current == null) {
-        return TransientResumeResult.IGNORED
-      }
-      try {
-        current.resume()
-      } catch (error: RuntimeException) {
-        Log.w(TAG, "MediaRecorder.resume failed after focus gain", error)
-        return TransientResumeResult.FAILED
-      }
-      pausedByTransientFocus = false
-      segmentStartedAt = SystemClock.elapsedRealtime()
-      phase = Phase.RECORDING
-      serviceAlive = true
-      lastError = null
-      persistLocked(context)
-      Log.i(TAG, "resumed after transient audio focus")
-      return TransientResumeResult.RESUMED
-    }
-  }
-
-  fun stop(context: Context): Boolean {
-    synchronized(lock) {
-      if (phase == Phase.STOPPED) {
-        // Notification Stop carries no operation id. A second stop must not
-        // replace a finished save with "Nothing is recording".
-        lastError = null
-        return true
-      }
-      if (phase == Phase.INTERRUPTED) {
-        if (lastError == null) {
-          lastError = if (activeCorrupt) {
-            "The recording was kept, but the file may be incomplete"
-          } else {
-            "The recording was interrupted"
-          }
-        }
-        return false
-      }
-      if (phase != Phase.RECORDING && phase != Phase.PAUSED) {
-        lastError = "Nothing is recording"
-        return false
-      }
-      if (phase == Phase.RECORDING) {
-        accumulatedMs += SystemClock.elapsedRealtime() - segmentStartedAt
-      }
-      pausedByTransientFocus = false
-      val finalized = finalizeRecorderLocked()
-      serviceAlive = false
+  private fun finish(context: Context, reason: String?) {
+    serviceAlive = false
+    pausedByTransientFocus = false
+    var failure = reason
+    try { capture?.stop() } catch (error: Exception) {
+      failure = error.message ?: "Some audio could not be finalized; files were kept"
+    } finally {
+      capture?.release()
       abandonFocusLocked(context)
-      val file = activeFile(context)
-      val playable = finalized && file != null && mediaLooksPlayable(file)
-      if (playable) {
-        activePlayable = true
-        activeCorrupt = false
-        phase = Phase.STOPPED
-        lastError = null
-        persistLocked(context)
-        Log.i(TAG, "stopped at $accumulatedMs")
-        return true
-      }
-      val kept = file != null && file.exists() && file.length() > 0L
-      activePlayable = false
-      activeCorrupt = kept
+    }
+    accumulatedMs = capture?.session?.durationMs ?: accumulatedMs
+    val session = capture?.session
+    val complete = session != null && session.segments.isNotEmpty() && session.segments.all { it.complete }
+    phase = if (failure == null && complete) Phase.STOPPED else Phase.INTERRUPTED
+    lastError = failure ?: if (complete) null else "Incomplete audio kept for recovery"
+    try { capture?.persist(phase.wire) } catch (_: Exception) {
       phase = Phase.INTERRUPTED
-      lastError = if (kept) {
-        "The recording was kept, but the file may be incomplete"
-      } else {
-        "The recording could not be saved"
-      }
-      persistLocked(context)
-      Log.w(TAG, "stop kept partial file=$kept finalized=$finalized")
-      return false
+      lastError = "Could not save the recording journal; audio kept for recovery"
     }
   }
 
-  fun interrupt(context: Context, reason: String) {
-    synchronized(lock) {
-      if (phase != Phase.RECORDING && phase != Phase.PAUSED) {
-        serviceAlive = false
-        return
-      }
-      if (phase == Phase.RECORDING) {
-        accumulatedMs += SystemClock.elapsedRealtime() - segmentStartedAt
-      }
-      pausedByTransientFocus = false
-      val finalized = finalizeRecorderLocked()
-      serviceAlive = false
-      val file = activeFile(context)
-      val playable = finalized && file != null && mediaLooksPlayable(file)
-      if (playable) {
-        activePlayable = true
-        activeCorrupt = false
-      } else {
-        activePlayable = false
-        activeCorrupt = file != null && file.exists() && file.length() > 0L
-      }
-      phase = Phase.INTERRUPTED
-      persistLocked(context)
-      abandonFocusLocked(context)
-      Log.w(TAG, "interrupted: $reason elapsed=$accumulatedMs finalized=$finalized")
-    }
+  fun persistElapsed(context: Context) = synchronized(lock) {
+    if (serviceAlive && !hasPermissions(context)) interrupt(context, "Recording permission was revoked")
+    // Only transitions write the journal. Duration of each committed part is authoritative.
   }
 
-  fun persistElapsed(context: Context) {
-    synchronized(lock) {
-      if (phase != Phase.RECORDING && phase != Phase.PAUSED) {
-        return
-      }
-      persistLocked(context)
-    }
-  }
-
-  fun reconcile(context: Context): Map<String, Any?> {
-    val liveId = synchronized(lock) {
-      if (serviceAlive && (phase == Phase.RECORDING || phase == Phase.PAUSED)) {
-        activeId
-      } else {
-        null
-      }
-    }
-    RecordingStore.markInterruptedIfOrphaned(context, liveId)
-    if (liveId == null) {
-      synchronized(lock) {
-        if (!serviceAlive && (phase == Phase.RECORDING || phase == Phase.PAUSED)) {
-          phase = Phase.INTERRUPTED
-          pausedByTransientFocus = false
-        }
-        // Cold start: surface the newest interrupted file so the UI cannot
-        // keep a previous process's "recording" flag.
-        if (!serviceAlive && phase == Phase.IDLE && activeId == null) {
-          val latest = RecordingStore.readAll(context).maxByOrNull { it.updatedAtMs }
-          if (latest != null && latest.state == "interrupted") {
-            activeId = latest.id
-            activeFileName = latest.fileName
-            startedAtMs = latest.startedAtMs
-            accumulatedMs = latest.elapsedMs
-            activePlayable = latest.playable
-            activeCorrupt = latest.corrupt
-            phase = Phase.INTERRUPTED
-          }
+  fun reconcile(context: Context): Map<String, Any?> = synchronized(lock) {
+    val live = if (serviceAlive) activeId else null
+    RecordingStore.markInterruptedIfOrphaned(context, live)
+    val store = journal(context)
+    val sessions = store.readAll().map { if (it.id == live) it else store.reconcile(it) }
+    if (!serviceAlive) {
+      val latest = sessions.maxByOrNull { it.startedAtMs }
+      if (latest != null && (activeId == latest.id || activeId == null)) {
+        activeId = latest.id
+        accumulatedMs = latest.durationMs
+        phase = if (latest.state == "stopped") Phase.STOPPED else Phase.INTERRUPTED
+      } else if (activeId == null) {
+        RecordingStore.readAll(context).maxByOrNull { it.updatedAtMs }?.let {
+          activeId = it.id
+          accumulatedMs = it.elapsedMs
+          phase = if (it.state == "stopped") Phase.STOPPED else Phase.INTERRUPTED
         }
       }
     }
-    return statusMap(context)
+    statusMap(context)
   }
 
-  fun list(context: Context): List<Map<String, Any?>> {
-    return RecordingStore.readAll(context)
-      .sortedByDescending { it.startedAtMs }
-      .map { meta ->
-        val file = RecordingStore.fileFor(context, meta.fileName)
-        val sizeBytes = if (file.exists()) file.length() else 0L
-        val inProgress = meta.state == "recording" || meta.state == "paused"
-        val nonempty = sizeBytes > 0L
-        val playable = !inProgress &&
-          nonempty &&
-          !meta.corrupt &&
-          mediaLooksPlayable(file)
-        val corrupt = !inProgress && nonempty && !playable
-        hashMapOf<String, Any?>(
-          "id" to meta.id,
-          "fileUri" to if (playable) RecordingStore.uriFor(context, meta.fileName) else null,
-          "state" to meta.state,
-          "elapsedMs" to meta.elapsedMs,
-          "startedAtMs" to meta.startedAtMs,
-          "updatedAtMs" to meta.updatedAtMs,
-          "playable" to playable,
-          "corrupt" to corrupt,
-          "sizeBytes" to sizeBytes,
-        )
-      }
-  }
-
-  fun statusMap(context: Context): Map<String, Any?> {
-    synchronized(lock) {
-      val fileName = activeFileName
-      val uri = if (fileName != null) {
-        val file = RecordingStore.fileFor(context, fileName)
-        if (file.exists()) RecordingStore.uriFor(context, fileName) else null
-      } else {
-        null
-      }
-      return hashMapOf<String, Any?>(
-        "serviceAlive" to serviceAlive,
-        "phase" to phase.wire,
-        "sessionId" to activeId,
-        "elapsedMs" to elapsedLocked(),
-        "fileUri" to uri,
-        "pausedByFocus" to pausedByTransientFocus,
-        "lastError" to lastError,
-      )
+  fun list(context: Context): List<Map<String, Any?>> = synchronized(lock) {
+    val legacy = RecordingStore.readAll(context).map { meta ->
+      val file = RecordingStore.fileFor(context, meta.fileName)
+      val playable = meta.state != "recording" && meta.state != "paused" && !meta.corrupt &&
+        SegmentJournal.audioDuration(file) != null
+      val uri = if (playable) RecordingStore.uriFor(context, meta.fileName) else null
+      mapOf<String, Any?>("id" to meta.id, "state" to meta.state, "elapsedMs" to meta.elapsedMs,
+        "startedAtMs" to meta.startedAtMs, "updatedAtMs" to meta.updatedAtMs,
+        "playable" to playable, "corrupt" to !playable, "sizeBytes" to file.length(),
+        "fileUri" to uri, "parts" to if (uri != null) listOf(mapOf("fileUri" to uri, "durationMs" to meta.elapsedMs)) else emptyList<Any>(),
+        "incompleteParts" to if (playable) 0 else 1, "rotationGapMs" to 0)
     }
+    val store = journal(context)
+    val segmented = store.readAll().map { session ->
+      val parts = session.segments.filter { it.complete && store.file(it.fileName).isFile }
+      val live = serviceAlive && session.id == activeId
+      val uris = parts.map { mapOf("fileUri" to android.net.Uri.fromFile(store.file(it.fileName)).toString(), "durationMs" to it.durationMs) }
+      mapOf<String, Any?>("id" to session.id, "state" to if (live) phase.wire else session.state,
+        "elapsedMs" to if (live) elapsedLocked() else session.durationMs,
+        "startedAtMs" to session.startedAtMs, "updatedAtMs" to session.startedAtMs,
+        "playable" to (!live && parts.isNotEmpty()), "corrupt" to (parts.size != session.segments.size),
+        "sizeBytes" to session.segments.sumOf { store.file(it.fileName).length() + store.file(it.fileName + ".partial").length() },
+        "fileUri" to uris.firstOrNull()?.get("fileUri"), "parts" to uris,
+        "incompleteParts" to (session.segments.size - parts.size), "rotationGapMs" to session.rotationGapMs)
+    }
+    (legacy + segmented).sortedByDescending { it["startedAtMs"] as Long }
   }
 
-  fun emit(context: Context) {
-    val snapshot = statusMap(context)
-    onStatus?.invoke(snapshot)
+  fun statusMap(context: Context): Map<String, Any?> = synchronized(lock) {
+    mapOf("serviceAlive" to serviceAlive, "phase" to phase.wire, "sessionId" to activeId,
+      "elapsedMs" to elapsedLocked(), "fileUri" to null, "pausedByFocus" to pausedByTransientFocus,
+      "lastError" to lastError)
   }
+  fun emit(context: Context) { onStatus?.invoke(statusMap(context)) }
+  private fun journal(context: Context) = SegmentJournal(RecordingStore.directory(context))
+  private fun elapsedLocked(): Long = if (phase == Phase.RECORDING && serviceAlive)
+    accumulatedMs + (SystemClock.elapsedRealtime() - segmentStartedAt) else accumulatedMs
 
-  /**
-   * Waits until [op] settles. Success requires the target phase and no error.
-   * A session that was already interrupted does not count as success.
-   */
   fun awaitSettled(context: Context, op: Long, target: Phase, timeoutMs: Long): Map<String, Any?> {
     if (op <= 0L) {
       throw RecorderException("The recording service did not respond")
@@ -559,90 +331,6 @@ internal object RecorderController {
     return statusMap(context)
   }
 
-  private fun elapsedLocked(): Long {
-    return if (phase == Phase.RECORDING) {
-      accumulatedMs + (SystemClock.elapsedRealtime() - segmentStartedAt)
-    } else {
-      accumulatedMs
-    }
-  }
-
-  private fun activeFile(context: Context): File? {
-    val fileName = activeFileName ?: return null
-    return RecordingStore.fileFor(context, fileName)
-  }
-
-  private fun persistLocked(context: Context) {
-    val id = activeId ?: return
-    val fileName = activeFileName ?: return
-    RecordingStore.write(
-      context,
-      SessionMeta(
-        id = id,
-        state = phase.wire,
-        elapsedMs = elapsedLocked(),
-        startedAtMs = startedAtMs,
-        updatedAtMs = System.currentTimeMillis(),
-        fileName = fileName,
-        playable = activePlayable,
-        corrupt = activeCorrupt,
-      ),
-    )
-  }
-
-  /** True only when stop() returns. A thrown stop leaves an invalid MPEG-4 file. */
-  private fun finalizeRecorderLocked(): Boolean {
-    val current = recorder ?: return false
-    recorder = null
-    val stopped = try {
-      current.stop()
-      true
-    } catch (error: RuntimeException) {
-      Log.w(TAG, "MediaRecorder.stop failed", error)
-      false
-    }
-    releaseQuietly(current)
-    return stopped
-  }
-
-  private fun mediaLooksPlayable(file: File): Boolean {
-    if (!file.exists() || file.length() <= 0L) {
-      return false
-    }
-    val retriever = MediaMetadataRetriever()
-    try {
-      retriever.setDataSource(file.absolutePath)
-      val duration = retriever
-        .extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
-        ?.toLongOrNull()
-        ?: 0L
-      val hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
-      return duration > 0L && hasAudio != "no"
-    } catch (error: Exception) {
-      Log.w(TAG, "media validation failed for ${file.name}", error)
-      return false
-    } finally {
-      try {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-          retriever.close()
-        } else {
-          @Suppress("DEPRECATION")
-          retriever.release()
-        }
-      } catch (error: Exception) {
-        Log.w(TAG, "MediaMetadataRetriever release failed", error)
-      }
-    }
-  }
-
-  private fun createRecorder(context: Context): MediaRecorder {
-    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-      MediaRecorder(context)
-    } else {
-      @Suppress("DEPRECATION")
-      MediaRecorder()
-    }
-  }
 
   private fun requestAudioFocus(context: Context, onSignal: (CaptureSignal) -> Unit): Boolean {
     val manager = context.getSystemService(AudioManager::class.java) ?: return false
@@ -695,17 +383,5 @@ internal object RecorderController {
     focusListener = null
   }
 
-  private fun releaseQuietly(current: MediaRecorder) {
-    try {
-      current.release()
-    } catch (error: RuntimeException) {
-      Log.w(TAG, "MediaRecorder.release failed", error)
-    }
-  }
 
-  private fun deleteIfEmpty(file: File) {
-    if (file.exists() && file.length() == 0L) {
-      file.delete()
-    }
-  }
 }

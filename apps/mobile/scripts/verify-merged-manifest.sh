@@ -72,6 +72,10 @@ import xml.etree.ElementTree as ET
 
 path = sys.argv[1]
 tree = ET.parse(path)
+application = tree.getroot().find("application")
+allow_backup = "{http://schemas.android.com/apk/res/android}allowBackup"
+if application is None or application.attrib.get(allow_backup) != "false":
+    sys.exit("private recordings require application android:allowBackup=false")
 ns = {"android": "http://schemas.android.com/apk/res/android"}
 name = "{http://schemas.android.com/apk/res/android}name"
 exported = "{http://schemas.android.com/apk/res/android}exported"

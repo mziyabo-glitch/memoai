@@ -4,6 +4,8 @@ Android-first personal meeting recorder. Phase 1 records on the phone with a nat
 
 ## Layout
 
+Development coordination: read [the architecture and privacy boundaries](docs/ARCHITECTURE.md) and [the exact next Cursor Cloud Agent task](docs/CURSOR_HANDOFF.md). Use feature branches and PRs; physical-device recording acceptance remains pending.
+
 - `apps/mobile` — React Native + Expo development build (`expo-dev-client`). Expo Go is not supported.
 - `apps/mobile/modules/memoai-recorder` — autolinked Kotlin Expo module. This is the recorder.
 - `apps/web` — Next.js page for Vercel. It does not record.

@@ -36,6 +36,11 @@ class MemoAiRecorderService : Service() {
         return
       }
       RecorderController.persistElapsed(this@MemoAiRecorderService)
+      if (!RecorderController.serviceAlive) {
+        RecorderController.emit(this@MemoAiRecorderService)
+        shutdown()
+        return
+      }
       handler.postDelayed(this, TICK_MS)
     }
   }
@@ -73,6 +78,11 @@ class MemoAiRecorderService : Service() {
   private fun handleStart(intent: Intent) {
     val op = intent.getLongExtra(EXTRA_OP, 0L)
     try {
+      if (RecorderController.serviceAlive) {
+        RecorderController.failCommand("A recording is already in progress")
+        RecorderController.emit(this)
+        return
+      }
       try {
         promoteToForeground(recording = true)
       } catch (error: Exception) {
@@ -136,6 +146,7 @@ class MemoAiRecorderService : Service() {
         }
       }
       RecorderController.emit(this)
+      if (!RecorderController.serviceAlive) shutdown()
     } finally {
       RecorderController.settle(op)
     }
@@ -160,6 +171,7 @@ class MemoAiRecorderService : Service() {
         }
       }
       RecorderController.emit(this)
+      if (!RecorderController.serviceAlive) shutdown()
     } finally {
       RecorderController.settle(op)
     }
@@ -212,6 +224,12 @@ class MemoAiRecorderService : Service() {
   private fun onCaptureSignal(signal: CaptureSignal) {
     try {
       when (signal) {
+        CaptureSignal.SEGMENT_LIMIT -> {
+          if (!RecorderController.rotate(this)) {
+            if (!RecorderController.serviceAlive) shutdown()
+          }
+          RecorderController.emit(this)
+        }
         CaptureSignal.TRANSIENT_FOCUS_LOSS -> {
           when (RecorderController.pauseForTransientFocus(this)) {
             TransientPauseResult.PAUSED -> {

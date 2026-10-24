@@ -28,6 +28,8 @@ internal object RecordingStore {
   }
 
   fun fileFor(context: Context, fileName: String): File {
+    require(fileName.isNotBlank() && fileName != "." && fileName != ".." &&
+      !fileName.contains('/') && !fileName.contains('\\'))
     return File(directory(context), fileName)
   }
 
@@ -63,7 +65,10 @@ internal object RecordingStore {
     }.distinctBy { it.name }.mapNotNull { file ->
       try {
         AtomicFile(file).openRead().bufferedReader(Charsets.UTF_8).use {
-          fromJson(JSONObject(it.readText()))
+          val meta = fromJson(JSONObject(it.readText()))
+          require(file.name == "${meta.id}.json")
+          fileFor(context, meta.fileName)
+          meta
         }
       } catch (_: Exception) {
         null

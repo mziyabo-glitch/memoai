@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   AppState,
+  Alert,
   Linking,
   Pressable,
   ScrollView,
@@ -15,7 +16,6 @@ import {
   formatFileSize,
   parseSessionState,
   projectVisibleState,
-  totalRecordingBytes,
   type SessionState,
   type VisibleSession,
 } from "@memoai/shared";
@@ -23,6 +23,7 @@ import {
   getRecorder,
   type LocalRecordingRecord,
   type RecorderStatus,
+  type RecoveryFile,
 } from "memoai-recorder";
 import {
   capturePermissionGranted,
@@ -99,6 +100,12 @@ export function RecorderScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [playingUri, setPlayingUri] = useState<string | null>(null);
+  const [playingId, setPlayingId] = useState<string | null>(null);
+  const [partNumber, setPartNumber] = useState(1);
+  const [recoveryFiles, setRecoveryFiles] = useState<RecoveryFile[]>([]);
+  const [storageBytes, setStorageBytes] = useState(0);
+  const playlist = useRef<string[]>([]);
+  const playlistIndex = useRef(0);
   const [pausedByFocus, setPausedByFocus] = useState(false);
 
   const refreshLibrary = useCallback(() => {
@@ -106,7 +113,26 @@ export function RecorderScreen() {
       return;
     }
     setRecordings(recorder.listRecordings());
+    setRecoveryFiles(recorder.listRecoveryFiles());
+    setStorageBytes(recorder.storageBytes());
   }, [recorder]);
+
+  useEffect(() => {
+    if (!playback.didJustFinish || playlist.current.length === 0) return;
+    const nextIndex = playlistIndex.current + 1;
+    const next = playlist.current[nextIndex];
+    if (!next) {
+      playlist.current = [];
+      setPlayingId(null);
+      setPlayingUri(null);
+      return;
+    }
+    playlistIndex.current = nextIndex;
+    setPartNumber(nextIndex + 1);
+    setPlayingUri(next);
+    player.replace(next);
+    player.play();
+  }, [playback.didJustFinish, player]);
 
   const refreshStatus = useCallback(() => {
     if (!recorder) {
@@ -222,6 +248,12 @@ export function RecorderScreen() {
     setBusy(true);
     setError(null);
     try {
+      if (action === "start" || action === "resume") {
+        player.pause();
+        playlist.current = [];
+        setPlayingId(null);
+        setPlayingUri(null);
+      }
       const status = await recorder[action]();
       setSessionId(status.sessionId);
       setPausedByFocus(status.pausedByFocus);
@@ -248,19 +280,35 @@ export function RecorderScreen() {
       return;
     }
     try {
-      if (playingUri === recording.fileUri && playback.playing) {
+      if (playingId === recording.id && playback.playing) {
         player.pause();
         void player.seekTo(0);
+        playlist.current = [];
+        setPlayingId(null);
         return;
       }
-      if (playingUri !== recording.fileUri) {
-        player.replace(recording.fileUri);
-        setPlayingUri(recording.fileUri);
-      }
+      playlist.current = recording.parts.map((part) => part.fileUri);
+      playlistIndex.current = 0;
+      setPartNumber(1);
+      setPlayingId(recording.id);
+      player.replace(recording.fileUri);
+      setPlayingUri(recording.fileUri);
       player.play();
     } catch (playError) {
       setError(messageOf(playError));
     }
+  }
+
+  async function recoveryAction(action: "recoverFile" | "exportRecoveryFile" | "deleteRecoveryFile", name: string) {
+    if (!recorder || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await recorder[action](name);
+      recorder.reconcile();
+      refreshLibrary();
+    } catch (failure) { setError(messageOf(failure)); }
+    finally { setBusy(false); }
   }
 
   if (!recorder) {
@@ -378,9 +426,7 @@ export function RecorderScreen() {
         <View style={styles.libraryHeader}>
           <Text style={styles.section}>Library</Text>
           <Text style={styles.storageTotal}>
-            {formatFileSize(
-              totalRecordingBytes(recordings.map((item) => item.sizeBytes)),
-            )}{" "}
+            {formatFileSize(storageBytes)}{" "}
             stored on this phone
           </Text>
         </View>
@@ -389,7 +435,7 @@ export function RecorderScreen() {
         ) : (
           recordings.map((recording) => {
             const playingThis =
-              playingUri === recording.fileUri && playback.playing;
+              playingId === recording.id && playingUri !== null && playback.playing;
             const locked =
               visible.showRecording || visible.state === "paused";
             return (
@@ -401,6 +447,13 @@ export function RecorderScreen() {
                   <Fact label="Duration" value={formatDuration(recording.elapsedMs)} />
                   <Fact label="Date" value={recordingDate(recording.startedAtMs)} />
                   <Fact label="Time" value={recordingTime(recording.startedAtMs)} />
+                  <Fact label="Saved sections" value={String(recording.parts.length)} />
+                  {playingThis && recording.parts.length > 1 && (
+                    <Text style={styles.body}>Playing section {partNumber} of {recording.parts.length}</Text>
+                  )}
+                  {recording.incompleteParts > 0 && (
+                    <Text style={styles.body}>{recording.incompleteParts} section(s) unfinished or missing. Play includes saved audio only.</Text>
+                  )}
                   <Fact
                     label="Size"
                     value={formatFileSize(recording.sizeBytes)}
@@ -427,6 +480,23 @@ export function RecorderScreen() {
             );
           })
         )}
+        {recoveryFiles.length > 0 && (
+          <View style={styles.libraryHeader}>
+            <Text style={styles.section}>Files needing recovery</Text>
+            <Text style={styles.body}>These files were kept but are not confirmed as saved audio. Recover checks them; Export lets you keep a separate copy.</Text>
+            {recoveryFiles.map((file) => (
+              <View key={file.name} style={styles.rowText}>
+                <Text style={styles.rowMeta}>{file.name} · {formatFileSize(file.sizeBytes)}</Text>
+                {file.canRecover && <Control label="Recover" enabled={!busy} onPress={() => void recoveryAction("recoverFile", file.name)} />}
+                <Control label="Export" enabled={!busy} onPress={() => void recoveryAction("exportRecoveryFile", file.name)} />
+                <Control label="Delete" enabled={!busy} onPress={() => Alert.alert(
+                  "Delete recovery file?", "This permanently deletes this file. Export a copy first if you want to keep it.",
+                  [{ text: "Cancel", style: "cancel" }, { text: "Delete", style: "destructive", onPress: () => void recoveryAction("deleteRecoveryFile", file.name) }],
+                )} />
+              </View>
+            ))}
+          </View>
+        )}
       </ScrollView>
     </SafeAreaView>
   );
@@ -438,7 +508,7 @@ function hintFor(
   pausedByFocus: boolean,
 ): string {
   if (visible.showRecording) {
-    return "Locking the screen or switching apps keeps this service recording.";
+    return "Audio is saved in sections about every 45 seconds. Small gaps may occur between sections. Keep the recording notification visible.";
   }
   if (visible.state === "paused") {
     if (pausedByFocus) {
@@ -447,6 +517,7 @@ function hintFor(
     return "Paused time is not added to the duration.";
   }
   if (visible.state === "interrupted") {
+    if (active?.playable) return "The recording was interrupted. Saved sections can still play; unfinished files are kept for recovery.";
     if (!active || active.corrupt || !active.playable) {
       return "The file is still on this phone, but it may be incomplete and cannot be played.";
     }
@@ -504,6 +575,7 @@ function libraryState(
     return "Paused";
   }
   if (recording.corrupt || !recording.playable) {
+    if (recording.playable) return "Interrupted · saved sections available";
     return "Incomplete";
   }
   const parsed = parseSessionState(recording.state);

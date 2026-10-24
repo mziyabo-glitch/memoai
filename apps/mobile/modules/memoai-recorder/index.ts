@@ -28,7 +28,12 @@ export type LocalRecordingRecord = {
   corrupt: boolean;
   /** Byte length of the file on disk. Not derived from duration. */
   sizeBytes: number;
+  parts: { fileUri: string; durationMs: number }[];
+  incompleteParts: number;
+  rotationGapMs: number;
 };
+
+export type RecoveryFile = { name: string; sizeBytes: number; canRecover: boolean };
 
 type MemoAiRecorderEvents = {
   onChange: (status: RecorderStatus) => void;
@@ -38,6 +43,11 @@ declare class MemoAiRecorderModule extends NativeModule<MemoAiRecorderEvents> {
   getStatus(): RecorderStatus;
   reconcile(): RecorderStatus;
   listRecordings(): LocalRecordingRecord[];
+  listRecoveryFiles(): RecoveryFile[];
+  storageBytes(): number;
+  recoverFile(name: string): Promise<void>;
+  exportRecoveryFile(name: string): Promise<void>;
+  deleteRecoveryFile(name: string): Promise<void>;
   start(): Promise<RecorderStatus>;
   pause(): Promise<RecorderStatus>;
   resume(): Promise<RecorderStatus>;
