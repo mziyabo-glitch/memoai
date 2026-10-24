@@ -1,6 +1,6 @@
 # Notes worker
 
-`POST /api/notes/step` runs one audio section at a time. Stored sections are capped at 20 MiB, matching the private bucket. The phone starts a job with the user's access token. The worker secret stays on the server. Migration `20261024151532_fix_summary_job_delete.sql` is not applied yet. Do not replay the earlier MemoAi migrations. See docs/SUPABASE_SETUP_STATUS.md. No worker is deployed and no live provider call has been made.
+`POST /api/notes/step` runs one audio section at a time. Stored sections are capped at 20 MiB, matching the private bucket. The phone starts a job with the user's access token. The worker secret stays on the server. Remote migration `20261024152412` is the summary deletion fix. Do not apply it again, and do not replay the earlier MemoAi migrations. See docs/SUPABASE_SETUP_STATUS.md. No worker is deployed and no live provider call has been made.
 
 # Notes processing foundation
 

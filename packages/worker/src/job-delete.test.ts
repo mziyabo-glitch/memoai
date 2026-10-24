@@ -3,7 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { describe, expect, it } from "vitest";
 
 const fix = readFileSync(
-  new URL("../../../supabase/migrations/20261024151532_fix_summary_job_delete.sql", import.meta.url),
+  new URL("../../../supabase/migrations/20261024152412_fix_summary_job_delete.sql", import.meta.url),
   "utf8",
 );
 

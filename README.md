@@ -26,7 +26,7 @@ The phone records without a Supabase project. Use the dashboard when you want th
 2. Open **Project Settings → API**.
 3. Copy the project URL and the anon public key.
 4. Put them in `apps/mobile/.env` and `apps/web/.env.local` using the names in `.env.example`.
-5. The MemoAi project already has the phase 1 schema and the notes tables. Do not paste those files again. The version map and the one pending fix are in [docs/SUPABASE_SETUP_STATUS.md](docs/SUPABASE_SETUP_STATUS.md). Notes setup is in [docs/NOTES_PROCESSING.md](docs/NOTES_PROCESSING.md).
+5. The MemoAi project already has the phase 1 schema, the notes tables, and summary-deletion migration `20261024152412`. Do not paste those files again. The version map is in [docs/SUPABASE_SETUP_STATUS.md](docs/SUPABASE_SETUP_STATUS.md). Notes setup is in [docs/NOTES_PROCESSING.md](docs/NOTES_PROCESSING.md).
 
 Row level security is enabled. Each row is scoped by `user_id` to `auth.users`, and the policies allow select, insert, update, and delete only for that user. The notes worker is implemented in this repo and is not deployed from CI. See [docs/NOTES_PROCESSING.md](docs/NOTES_PROCESSING.md).
 

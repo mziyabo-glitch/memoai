@@ -10,12 +10,12 @@ An older file larger than 20 MiB is not cut. The phone explains that the origina
 - `POST /api/notes/step` accepts the signed-in user's Supabase access token. It checks that the job belongs to that user. The phone has no worker secret and no service-role key.
 - The same route accepts `Authorization: Bearer <MEMOAI_WORKER_SECRET>` for a scheduler. That secret stays in the host dashboard.
 - Each section is one OpenAI call. The route stops before starting another section when less than 90 seconds remain of a 240 second budget (`MEMOAI_STEP_BUDGET_MS`). A call that already left and then times out is marked uncertain and is not repeated.
-- Deleting a job no longer has to null `summaries.user_id`. Migration `20261024151532_fix_summary_job_delete.sql` nulls only `job_id`. It is in git and was not applied to MemoAi by this change.
+- Deleting a job no longer has to null `summaries.user_id`. Remote migration `20261024152412` nulls only `job_id`. Do not apply it again.
 - Paid processing stays off unless `MEMOAI_ALLOW_PROVIDER=1`.
 
 ## What is deployed
 
-The MemoAi database and private bucket are already live. See `docs/SUPABASE_SETUP_STATUS.md`. No worker host was deployed. No server secrets were configured.
+The MemoAi database, private bucket, and summary-deletion migration `20261024152412` are already live. See `docs/SUPABASE_SETUP_STATUS.md`. This change does not apply that migration again. No worker host was deployed. No server secrets were configured.
 
 ## What was verified live
 
@@ -47,7 +47,7 @@ Leave `MEMOAI_ALLOW_PROVIDER` unset until you intend to pay for transcription. T
 
 ## Database
 
-Remote history already includes the phase 1 schema, the notes foundation, and the search-path hardening. Apply only `supabase/migrations/20261024151532_fix_summary_job_delete.sql`. Stop if a push wants to recreate the earlier files. Details are in `docs/SUPABASE_SETUP_STATUS.md`.
+Remote history already includes the phase 1 schema, the notes foundation, the search-path hardening, and `20261024152412` (summary job deletion). Do not apply those again. Details are in `docs/SUPABASE_SETUP_STATUS.md`.
 
 ## Worker host
 
