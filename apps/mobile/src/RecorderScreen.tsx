@@ -7,15 +7,26 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { useAudioPlayer, useAudioPlayerStatus, setAudioModeAsync } from "expo-audio";
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
+  SAMPLE_NOTE_DRAFTS,
+  acceptNotesConsent,
+  cleanTitle,
   formatDuration,
   formatFileSize,
+  groundNotes,
+  locateAudioSection,
+  matchesTitleQuery,
   parseSessionState,
   projectVisibleState,
+  recordingNotesLabel,
+  recordingNotesPhase,
+  sampleNotesLabel,
+  type NotesConsentRecord,
   type SessionState,
   type VisibleSession,
 } from "@memoai/shared";
@@ -35,9 +46,17 @@ import {
   acknowledgeParticipantNotice,
   hasAcknowledgedParticipantNotice,
 } from "./privacy";
+import { loadConsents, loadTitles, saveConsent, saveTitle } from "./libraryMeta";
+import { ConsentScreen, RecordingNotesScreen, SampleNotesScreen } from "./notesUi";
 import { theme } from "./theme";
 
 type Gate = "loading" | "privacy" | "explain" | "ready";
+
+type Route =
+  | { name: "library" }
+  | { name: "recording"; id: string }
+  | { name: "consent"; id: string }
+  | { name: "sample"; id: string };
 
 const idleVisible: VisibleSession = {
   state: "idle",
@@ -106,7 +125,15 @@ export function RecorderScreen() {
   const [storageBytes, setStorageBytes] = useState(0);
   const playlist = useRef<string[]>([]);
   const playlistIndex = useRef(0);
+  const playlistOrigin = useRef(0);
   const [pausedByFocus, setPausedByFocus] = useState(false);
+  const [route, setRoute] = useState<Route>({ name: "library" });
+  const [titleQuery, setTitleQuery] = useState("");
+  const [titles, setTitles] = useState<Record<string, string>>({});
+  const [consents, setConsents] = useState<Record<string, NotesConsentRecord>>({});
+  const [sampleDone, setSampleDone] = useState<Record<string, readonly string[]>>({});
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingValue, setEditingValue] = useState("");
 
   const refreshLibrary = useCallback(() => {
     if (!recorder) {
@@ -123,12 +150,13 @@ export function RecorderScreen() {
     const next = playlist.current[nextIndex];
     if (!next) {
       playlist.current = [];
+      playlistOrigin.current = 0;
       setPlayingId(null);
       setPlayingUri(null);
       return;
     }
     playlistIndex.current = nextIndex;
-    setPartNumber(nextIndex + 1);
+    setPartNumber(playlistOrigin.current + nextIndex + 1);
     setPlayingUri(next);
     player.replace(next);
     player.play();
@@ -156,6 +184,26 @@ export function RecorderScreen() {
       allowsBackgroundRecording: false,
     });
   }, []);
+
+  useEffect(() => {
+    if (gate !== "ready") {
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const [storedTitles, storedConsents] = await Promise.all([
+        loadTitles(),
+        loadConsents(),
+      ]);
+      if (!cancelled) {
+        setTitles(storedTitles);
+        setConsents(storedConsents);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [gate]);
 
   useEffect(() => {
     let cancelled = false;
@@ -251,6 +299,7 @@ export function RecorderScreen() {
       if (action === "start" || action === "resume") {
         player.pause();
         playlist.current = [];
+        playlistOrigin.current = 0;
         setPlayingId(null);
         setPlayingUri(null);
       }
@@ -271,6 +320,37 @@ export function RecorderScreen() {
     }
   }
 
+  function playFromMs(recording: LocalRecordingRecord, startMs: number) {
+    if (!recording.playable) {
+      return;
+    }
+    if (visible.showRecording || visible.state === "paused") {
+      setError("Stop or wait until the microphone is free before playback.");
+      return;
+    }
+    const located = locateAudioSection(recording.parts, startMs);
+    const uri = located ? recording.parts[located.partIndex]?.fileUri : null;
+    if (!located || !uri) {
+      setError("That time is past the saved audio.");
+      return;
+    }
+    try {
+      playlist.current = recording.parts.slice(located.partIndex).map((part) => part.fileUri);
+      playlistIndex.current = 0;
+      playlistOrigin.current = located.partIndex;
+      setPartNumber(located.partIndex + 1);
+      setPlayingId(recording.id);
+      player.replace(uri);
+      setPlayingUri(uri);
+      if (located.offsetMs > 0) {
+        void player.seekTo(located.offsetMs / 1000);
+      }
+      player.play();
+    } catch (playError) {
+      setError(messageOf(playError));
+    }
+  }
+
   function togglePlayback(recording: LocalRecordingRecord) {
     if (!recording.fileUri || !recording.playable) {
       return;
@@ -284,11 +364,13 @@ export function RecorderScreen() {
         player.pause();
         void player.seekTo(0);
         playlist.current = [];
+        playlistOrigin.current = 0;
         setPlayingId(null);
         return;
       }
       playlist.current = recording.parts.map((part) => part.fileUri);
       playlistIndex.current = 0;
+      playlistOrigin.current = 0;
       setPartNumber(1);
       setPlayingId(recording.id);
       player.replace(recording.fileUri);
@@ -384,6 +466,49 @@ export function RecorderScreen() {
     );
   }
 
+  const samples = __DEV__ ? SAMPLE_NOTE_DRAFTS : [];
+  const playbackLocked = visible.showRecording || visible.state === "paused";
+
+  async function updateTitle(id: string, value: string | null) {
+    try {
+      setTitles(await saveTitle(id, value));
+    } catch (failure) {
+      setError(messageOf(failure));
+    }
+  }
+
+  async function agreeToNotes(recordingId: string) {
+    const result = acceptNotesConsent();
+    if (result.uploaded || result.providerCalled || result.status !== "not-processed") {
+      return;
+    }
+    try {
+      setConsents(await saveConsent(recordingId, new Date().toISOString()));
+      setRoute({ name: "recording", id: recordingId });
+    } catch (failure) {
+      setError(messageOf(failure));
+    }
+  }
+
+  function displayTitle(id: string, fallback: string): string {
+    return titles[id] ?? fallback;
+  }
+
+  function notesPhase(recording: LocalRecordingRecord) {
+    return recordingNotesPhase({
+      live: recording.id === sessionId && playbackLocked,
+      playableParts: recording.parts.length,
+      elapsedMs: recording.elapsedMs,
+      consented: consents[recording.id] != null,
+    });
+  }
+
+  const openRecording =
+    route.name === "recording" || route.name === "consent"
+      ? recordings.find((recording) => recording.id === route.id)
+      : undefined;
+  const sampleDraft =
+    route.name === "sample" ? samples.find((draft) => draft.id === route.id) : undefined;
   const canStart =
     !busy &&
     !visible.showRecording &&
@@ -394,12 +519,128 @@ export function RecorderScreen() {
   const canPause = !busy && (visible.showRecording || pausedByFocus);
   const canResume = !busy && visible.state === "paused";
   const canStop = !busy && (visible.showRecording || visible.state === "paused");
+
+  if (route.name !== "library") {
+    const live = playbackLocked ? (
+      <View style={styles.timerBlock}>
+        <Text style={styles.status}>
+          {statusLabel(visible)} · {formatDuration(visible.elapsedMs)}
+        </Text>
+        <View style={styles.controls}>
+          <Control label="Pause" enabled={canPause} onPress={() => void runCommand("pause")} />
+          <Control label="Resume" enabled={canResume} onPress={() => void runCommand("resume")} tone="record" />
+          <Control label="Stop" enabled={canStop} onPress={() => void runCommand("stop")} />
+        </View>
+      </View>
+    ) : null;
+    let screen = (
+      <View style={styles.stack}>
+        <Text style={styles.body}>That item is no longer on this phone.</Text>
+        <Pressable accessibilityRole="button" onPress={() => setRoute({ name: "library" })}>
+          <Text style={styles.backLink}>Library</Text>
+        </Pressable>
+      </View>
+    );
+    if (route.name === "sample" && sampleDraft) {
+      screen = (
+        <SampleNotesScreen
+          draft={sampleDraft}
+          title={displayTitle(sampleDraft.id, sampleDraft.defaultTitle)}
+          onTitle={(next) => void updateTitle(sampleDraft.id, next)}
+          onBack={() => setRoute({ name: "library" })}
+          doneIds={sampleDone[sampleDraft.id] ?? []}
+          onToggle={(actionId) => {
+            setSampleDone((current) => {
+              const existing = current[sampleDraft.id] ?? [];
+              const next = existing.includes(actionId)
+                ? existing.filter((id) => id !== actionId)
+                : [...existing, actionId];
+              return { ...current, [sampleDraft.id]: next };
+            });
+          }}
+          onShareError={setError}
+        />
+      );
+    } else if (openRecording && route.name === "consent") {
+      const phase = notesPhase(openRecording);
+      screen = (
+        <ConsentScreen
+          allowAgree={phase === "none"}
+          alreadySaved={phase === "not-processed"}
+          blockedReason={
+            phase === "too-long"
+              ? "This recording is longer than 90 minutes, so permission is not saved."
+              : phase === "no-audio"
+                ? "There is no finished audio to transcribe."
+                : phase === "live"
+                  ? "Stop the recording before creating notes."
+                  : null
+          }
+          onAgree={() => void agreeToNotes(openRecording.id)}
+          onBack={() => setRoute({ name: "recording", id: openRecording.id })}
+        />
+      );
+    } else if (openRecording && route.name === "recording") {
+      screen = (
+        <RecordingNotesScreen
+          title={displayTitle(openRecording.id, recordingFallbackTitle(openRecording))}
+          onTitle={(next) => void updateTitle(openRecording.id, next)}
+          onBack={() => setRoute({ name: "library" })}
+          phase={notesPhase(openRecording)}
+          parts={openRecording.parts}
+          durationLabel={formatDuration(openRecording.elapsedMs)}
+          dateLabel={`${recordingDate(openRecording.startedAtMs)} · ${recordingTime(openRecording.startedAtMs)}`}
+          sizeLabel={formatFileSize(openRecording.sizeBytes)}
+          incompleteParts={openRecording.incompleteParts}
+          onCreateNotes={() => setRoute({ name: "consent", id: openRecording.id })}
+          onPlayAt={(startMs) => playFromMs(openRecording, startMs)}
+          playDisabled={playbackLocked || !openRecording.playable}
+          playingPart={
+            playingId === openRecording.id && playingUri !== null && playback.playing
+              ? partNumber
+              : null
+          }
+          error={error}
+        />
+      );
+    }
+    return (
+      <SafeAreaView style={styles.safe}>
+        <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+          <Text style={styles.mark}>MemoAI</Text>
+          {live}
+          {error && route.name !== "recording" ? <Text style={styles.error}>{error}</Text> : null}
+          {screen}
+        </ScrollView>
+      </SafeAreaView>
+    );
+  }
+
   const timerMs =
     visible.state === "idle" ? 0 : visible.elapsedMs;
+  const visibleRecordings = recordings.filter((recording) =>
+    matchesTitleQuery(
+      displayTitle(recording.id, recordingFallbackTitle(recording)),
+      titleQuery,
+    ),
+  );
+  const visibleSamples = samples.filter((draft) =>
+    matchesTitleQuery(displayTitle(draft.id, draft.defaultTitle), titleQuery),
+  );
+
+  function beginRename(id: string, current: string) {
+    setEditingId(id);
+    setEditingValue(current);
+  }
+
+  function commitRename(id: string) {
+    void updateTitle(id, cleanTitle(editingValue));
+    setEditingId(null);
+  }
 
   return (
     <SafeAreaView style={styles.safe}>
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         <Text style={styles.mark}>MemoAI</Text>
         <Text style={styles.kicker}>On this phone. No account.</Text>
         <View style={styles.timerBlock}>
@@ -430,17 +671,51 @@ export function RecorderScreen() {
             stored on this phone
           </Text>
         </View>
-        {recordings.length === 0 ? (
+        <TextInput
+          accessibilityLabel="Search by title"
+          value={titleQuery}
+          onChangeText={setTitleQuery}
+          placeholder="Search by title"
+          placeholderTextColor={theme.muted}
+          style={styles.search}
+        />
+        {recordings.length === 0 && titleQuery.trim() === "" ? (
           <Text style={styles.body}>No recordings yet.</Text>
+        ) : visibleRecordings.length === 0 ? (
+          <Text style={styles.body}>No recordings match that title.</Text>
         ) : (
-          recordings.map((recording) => {
+          visibleRecordings.map((recording) => {
             const playingThis =
               playingId === recording.id && playingUri !== null && playback.playing;
-            const locked =
-              visible.showRecording || visible.state === "paused";
+            const locked = playbackLocked;
+            const title = displayTitle(recording.id, recordingFallbackTitle(recording));
+            const editing = editingId === recording.id;
             return (
               <View key={recording.id} style={styles.row}>
                 <View style={styles.rowText}>
+                  {editing ? (
+                    <TextInput
+                      accessibilityLabel="Recording title"
+                      value={editingValue}
+                      onChangeText={setEditingValue}
+                      onEndEditing={() => commitRename(recording.id)}
+                      onSubmitEditing={() => commitRename(recording.id)}
+                      maxLength={80}
+                      returnKeyType="done"
+                      style={styles.rowTitle}
+                    />
+                  ) : (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open ${title}`}
+                      onPress={() => setRoute({ name: "recording", id: recording.id })}
+                    >
+                      <Text style={styles.rowTitle}>{title}</Text>
+                    </Pressable>
+                  )}
+                  <Text style={styles.notesStatus}>
+                    {recordingNotesLabel(notesPhase(recording))}
+                  </Text>
                   <Text style={styles.rowState}>
                     {libraryState(recording, visible, sessionId)}
                   </Text>
@@ -459,6 +734,24 @@ export function RecorderScreen() {
                     value={formatFileSize(recording.sizeBytes)}
                     emphasize
                   />
+                  <View style={styles.rowActions}>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Rename ${title}`}
+                      onPress={() => beginRename(recording.id, title)}
+                      style={styles.play}
+                    >
+                      <Text style={styles.playText}>Rename</Text>
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open ${title}`}
+                      onPress={() => setRoute({ name: "recording", id: recording.id })}
+                      style={styles.play}
+                    >
+                      <Text style={styles.playText}>Open</Text>
+                    </Pressable>
+                  </View>
                 </View>
                 <Pressable
                   accessibilityRole="button"
@@ -480,6 +773,65 @@ export function RecorderScreen() {
             );
           })
         )}
+        {visibleSamples.length > 0 ? (
+          <View style={styles.libraryHeader}>
+            <Text style={styles.section}>Samples</Text>
+            <Text style={styles.body}>
+              Development only. These notes were not created from a recording on this phone.
+            </Text>
+            {visibleSamples.map((draft) => {
+              const title = displayTitle(draft.id, draft.defaultTitle);
+              const editing = editingId === draft.id;
+              return (
+                <View key={draft.id} style={styles.row}>
+                  <View style={styles.rowText}>
+                    {editing ? (
+                      <TextInput
+                        accessibilityLabel="Sample title"
+                        value={editingValue}
+                        onChangeText={setEditingValue}
+                        onEndEditing={() => commitRename(draft.id)}
+                        onSubmitEditing={() => commitRename(draft.id)}
+                        maxLength={80}
+                        returnKeyType="done"
+                        style={styles.rowTitle}
+                      />
+                    ) : (
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Open sample ${title}`}
+                        onPress={() => setRoute({ name: "sample", id: draft.id })}
+                      >
+                        <Text style={styles.rowTitle}>{title}</Text>
+                      </Pressable>
+                    )}
+                    <Text style={styles.notesStatus}>
+                      {sampleNotesLabel(groundNotes(draft).status)}
+                    </Text>
+                    <View style={styles.rowActions}>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Rename ${title}`}
+                        onPress={() => beginRename(draft.id, title)}
+                        style={styles.play}
+                      >
+                        <Text style={styles.playText}>Rename</Text>
+                      </Pressable>
+                      <Pressable
+                        accessibilityRole="button"
+                        accessibilityLabel={`Open ${title}`}
+                        onPress={() => setRoute({ name: "sample", id: draft.id })}
+                        style={styles.play}
+                      >
+                        <Text style={styles.playText}>Open</Text>
+                      </Pressable>
+                    </View>
+                  </View>
+                </View>
+              );
+            })}
+          </View>
+        ) : null}
         {recoveryFiles.length > 0 && (
           <View style={styles.libraryHeader}>
             <Text style={styles.section}>Files needing recovery</Text>
@@ -527,6 +879,10 @@ function hintFor(
     return "Saved in the library below.";
   }
   return "Start when everyone knows they are being recorded.";
+}
+
+function recordingFallbackTitle(recording: LocalRecordingRecord): string {
+  return `Recording · ${recordingDate(recording.startedAtMs)} · ${recordingTime(recording.startedAtMs)}`;
 }
 
 function recordingDate(startedAtMs: number): string {
@@ -640,6 +996,35 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingBottom: 48,
     gap: 16,
+  },
+  stack: {
+    gap: 12,
+  },
+  backLink: {
+    color: theme.accent,
+    fontSize: 16,
+    fontWeight: "600",
+  },
+  search: {
+    color: theme.text,
+    fontSize: 16,
+    minHeight: 48,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: theme.line,
+    backgroundColor: theme.surface,
+    paddingHorizontal: 14,
+  },
+  notesStatus: {
+    color: theme.accent,
+    fontSize: 14,
+    lineHeight: 20,
+  },
+  rowActions: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 8,
+    marginTop: 8,
   },
   mark: {
     color: theme.accent,
