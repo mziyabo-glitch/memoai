@@ -30,7 +30,51 @@ export {
   sectionStartMs,
 } from "./notes";
 
+export {
+  DEFAULT_LEASE_MS,
+  MAX_DEFINITE_ATTEMPTS,
+  MAX_SECTION_BYTES,
+  NOTES_MODEL,
+  OPENAI_MAX_AUDIO_BYTES,
+  STORED_AUDIO_LIMIT_DETAIL,
+  TRANSCRIBE_MODEL,
+  audioObjectPath,
+  cancelJob,
+  claimStep,
+  createJob,
+  deleteJob,
+  describeCloud,
+  findReusableJob,
+  formatTranscriptForNotes,
+  interpretUploadError,
+  markRequestSent,
+  notesStartRequest,
+  pathOwnedBy,
+  planUpload,
+  processingKey,
+  runSectionUploads,
+  settleStep,
+  shouldPublish,
+  splitWithoutTouchingSource,
+  storagePaths,
+  transcriptTimeline,
+} from "./processing";
+
 export { SAMPLE_NOTE_DRAFTS } from "./sampleNotes";
+
+export type {
+  AcknowledgedSection,
+  CloudPhase,
+  AudioSlice,
+  ProcessJob,
+  ProcessStep,
+  SectionInput,
+  StepPhase,
+  StepSettlement,
+  TimedSnippet,
+  UploadBlockReason,
+  UploadPlan,
+} from "./processing";
 
 export type {
   AudioPart,

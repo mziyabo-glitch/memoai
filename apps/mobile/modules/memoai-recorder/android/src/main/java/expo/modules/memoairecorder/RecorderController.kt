@@ -264,6 +264,15 @@ internal object RecorderController {
     statusMap(context)
   }
 
+  /** Hash a legacy single file once, when an upload starts. Not used on the library timer. */
+  fun hashLegacyFile(context: Context, id: String): String = synchronized(lock) {
+    val meta = RecordingStore.readAll(context).firstOrNull { it.id == id }
+      ?: throw RecorderException("That recording is not a single file on this phone")
+    val file = RecordingStore.fileFor(context, meta.fileName)
+    if (!file.isFile) throw RecorderException("The audio file is missing")
+    SegmentJournal.sha256(file)
+  }
+
   fun list(context: Context): List<Map<String, Any?>> = synchronized(lock) {
     val legacy = RecordingStore.readAll(context).map { meta ->
       val file = RecordingStore.fileFor(context, meta.fileName)
@@ -273,14 +282,19 @@ internal object RecorderController {
       mapOf<String, Any?>("id" to meta.id, "state" to meta.state, "elapsedMs" to meta.elapsedMs,
         "startedAtMs" to meta.startedAtMs, "updatedAtMs" to meta.updatedAtMs,
         "playable" to playable, "corrupt" to !playable, "sizeBytes" to file.length(),
-        "fileUri" to uri, "parts" to if (uri != null) listOf(mapOf("fileUri" to uri, "durationMs" to meta.elapsedMs)) else emptyList<Any>(),
+        "fileUri" to uri, "parts" to if (uri != null) listOf(mapOf(
+          "fileUri" to uri, "durationMs" to meta.elapsedMs, "sizeBytes" to file.length(),
+          "sha256" to null, "finished" to true)) else emptyList<Any>(),
         "incompleteParts" to if (playable) 0 else 1, "rotationGapMs" to 0)
     }
     val store = journal(context)
     val segmented = store.readAll().map { session ->
       val parts = session.segments.filter { it.complete && store.file(it.fileName).isFile }
       val live = serviceAlive && session.id == activeId
-      val uris = parts.map { mapOf("fileUri" to android.net.Uri.fromFile(store.file(it.fileName)).toString(), "durationMs" to it.durationMs) }
+      val uris = parts.map { mapOf(
+        "fileUri" to android.net.Uri.fromFile(store.file(it.fileName)).toString(),
+        "durationMs" to it.durationMs, "sizeBytes" to it.sizeBytes,
+        "sha256" to it.sha256, "finished" to true) }
       mapOf<String, Any?>("id" to session.id, "state" to if (live) phase.wire else session.state,
         "elapsedMs" to if (live) elapsedLocked() else session.durationMs,
         "startedAtMs" to session.startedAtMs, "updatedAtMs" to session.startedAtMs,

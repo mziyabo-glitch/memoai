@@ -1,3 +1,11 @@
+# Notes worker
+
+`POST /api/notes/step` runs one audio section at a time. Stored sections are capped at 20 MiB, matching the private bucket. The phone starts a job with the user's access token. The worker secret stays on the server. Remote migration `20261024152412` is the summary deletion fix. Do not apply it again, and do not replay the earlier MemoAi migrations. See docs/SUPABASE_SETUP_STATUS.md. No worker is deployed and no live provider call has been made.
+
+# Notes processing foundation
+
+Branched from the sample-notes tip `cursor/ai-notes-sample-flow-2f69` (`7e9b06a`, draft PR #6). The worker transcribes one finished audio section per step because OpenAI accepts about 25 MB per request and a 90-minute recording does not fit in one call. Ordered sections from PR #5 are the chunks. A notes call uses the transcript text only after every section has a result. No live paid run is included. See docs/NOTES_PROCESSING.md. Do not apply the new SQL from CI.
+
 # Notes screens on the segmented recorder
 
 The notes branch starts at the tip of `feat/android-segmented-recovery` (draft PR #5, `0a169fe`). That tip already contains the phase 1 recorder, crash-safe metadata, and ordered audio sections. PR #1 and PR #5 are not retargeted or merged.

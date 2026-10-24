@@ -7,6 +7,7 @@ import {
 
 const TITLES_KEY = "memoai.recordingTitles.v1";
 const CONSENT_KEY = "memoai.notesConsent.v1";
+const ACKS_KEY = "memoai.sectionAcks.v1";
 
 export async function loadTitles(): Promise<Record<string, string>> {
   return sanitizeTitles(await AsyncStorage.getItem(TITLES_KEY));
@@ -38,6 +39,34 @@ export async function saveConsent(
   const current = await loadConsents();
   current[recordingId] = notesConsentRecord(recordingId, agreedAt);
   await AsyncStorage.setItem(CONSENT_KEY, JSON.stringify(current));
+  return current;
+}
+
+export async function loadAcknowledgedSections(): Promise<
+  Record<string, { sequence: number; sha256: string }[]>
+> {
+  const parsed = parseObject(await AsyncStorage.getItem(ACKS_KEY));
+  const result: Record<string, { sequence: number; sha256: string }[]> = {};
+  for (const [id, value] of Object.entries(parsed)) {
+    if (!Array.isArray(value)) continue;
+    const sections = value.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const row = item as { sequence?: unknown; sha256?: unknown };
+      if (typeof row.sequence !== "number" || typeof row.sha256 !== "string") return [];
+      return [{ sequence: row.sequence, sha256: row.sha256 }];
+    });
+    if (sections.length > 0) result[id] = sections;
+  }
+  return result;
+}
+
+export async function saveAcknowledgedSections(
+  recordingId: string,
+  sections: readonly { sequence: number; sha256: string }[],
+): Promise<Record<string, { sequence: number; sha256: string }[]>> {
+  const current = await loadAcknowledgedSections();
+  current[recordingId] = sections.map((section) => ({ ...section }));
+  await AsyncStorage.setItem(ACKS_KEY, JSON.stringify(current));
   return current;
 }
 

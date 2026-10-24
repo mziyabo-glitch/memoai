@@ -52,6 +52,10 @@ class MemoAiRecorderModule : Module() {
       RecorderController.list(requireContext())
     }
 
+    AsyncFunction("hashLegacyFile") { id: String ->
+      RecorderController.hashLegacyFile(requireContext(), id)
+    }
+
     Function("listRecoveryFiles") {
       synchronized(RecorderController.lock) { RecoveryFiles.list(requireContext()) }
     }

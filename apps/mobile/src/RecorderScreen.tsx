@@ -16,6 +16,8 @@ import {
   SAMPLE_NOTE_DRAFTS,
   acceptNotesConsent,
   cleanTitle,
+  deleteJob,
+  describeCloud,
   formatDuration,
   formatFileSize,
   groundNotes,
@@ -26,7 +28,10 @@ import {
   recordingNotesLabel,
   recordingNotesPhase,
   sampleNotesLabel,
+  storagePaths,
   type NotesConsentRecord,
+  type ProcessJob,
+  type SectionInput,
   type SessionState,
   type VisibleSession,
 } from "@memoai/shared";
@@ -46,8 +51,17 @@ import {
   acknowledgeParticipantNotice,
   hasAcknowledgedParticipantNotice,
 } from "./privacy";
-import { loadConsents, loadTitles, saveConsent, saveTitle } from "./libraryMeta";
-import { ConsentScreen, RecordingNotesScreen, SampleNotesScreen } from "./notesUi";
+import { getSupabase, supabaseConfigured } from "./account";
+import {
+  loadAcknowledgedSections,
+  loadConsents,
+  loadTitles,
+  saveAcknowledgedSections,
+  saveConsent,
+  saveTitle,
+} from "./libraryMeta";
+import { AccountScreen, ConsentScreen, RecordingNotesScreen, SampleNotesScreen } from "./notesUi";
+import { deleteUploadedAudio, uploadFinishedAudio } from "./uploadAudio";
 import { theme } from "./theme";
 
 type Gate = "loading" | "privacy" | "explain" | "ready";
@@ -56,7 +70,8 @@ type Route =
   | { name: "library" }
   | { name: "recording"; id: string }
   | { name: "consent"; id: string }
-  | { name: "sample"; id: string };
+  | { name: "sample"; id: string }
+  | { name: "account" };
 
 const idleVisible: VisibleSession = {
   state: "idle",
@@ -134,6 +149,13 @@ export function RecorderScreen() {
   const [sampleDone, setSampleDone] = useState<Record<string, readonly string[]>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingValue, setEditingValue] = useState("");
+  const [accountEmail, setAccountEmail] = useState<string | null>(null);
+  const [acks, setAcks] = useState<Record<string, { sequence: number; sha256: string }[]>>({});
+  const [cloudJobs, setCloudJobs] = useState<Record<string, ProcessJob | null>>({});
+  const [cloudUploads, setCloudUploads] = useState<
+    Record<string, { done: number; total: number; status: "uploading" | "interrupted" | "cancelled" | "complete" }>
+  >({});
+  const cancelUpload = useRef(false);
 
   const refreshLibrary = useCallback(() => {
     if (!recorder) {
@@ -195,9 +217,14 @@ export function RecorderScreen() {
         loadTitles(),
         loadConsents(),
       ]);
+      const storedAcks = await loadAcknowledgedSections();
+      const supabase = getSupabase();
+      const session = supabase ? await supabase.auth.getSession() : null;
       if (!cancelled) {
         setTitles(storedTitles);
         setConsents(storedConsents);
+        setAcks(storedAcks);
+        setAccountEmail(session?.data.session?.user.email ?? null);
       }
     })();
     return () => {
@@ -503,6 +530,119 @@ export function RecorderScreen() {
     });
   }
 
+  function cloudFor(recordingId: string) {
+    return describeCloud({
+      signedIn: accountEmail != null,
+      consented: consents[recordingId] != null,
+      upload: cloudUploads[recordingId] ?? null,
+      job: cloudJobs[recordingId] ?? null,
+    });
+  }
+
+  async function sectionsFor(recording: LocalRecordingRecord): Promise<SectionInput[]> {
+    const parts = recording.parts.map((part) => ({ ...part }));
+    if (parts.length === 1 && !parts[0]?.sha256 && recorder && typeof recorder.hashLegacyFile === "function") {
+      try {
+        const sha256 = await recorder.hashLegacyFile(recording.id);
+        parts[0] = { ...parts[0], sha256 };
+      } catch (failure) {
+        setError(messageOf(failure));
+      }
+    }
+    return parts.map((part, index) => ({
+      sequence: index,
+      sha256: part.sha256 ?? "",
+      sizeBytes: part.sizeBytes ?? 0,
+      durationMs: part.durationMs,
+      finished: part.finished !== false,
+    }));
+  }
+
+  async function beginUpload(recording: LocalRecordingRecord) {
+    cancelUpload.current = false;
+    const sections = await sectionsFor(recording);
+    setCloudUploads((current) => ({
+      ...current,
+      [recording.id]: { done: 0, total: Math.max(sections.length, 1), status: "uploading" },
+    }));
+    const outcome = await uploadFinishedAudio({
+      recordingId: recording.id,
+      title: displayTitle(recording.id, recordingFallbackTitle(recording)),
+      consentAt: consents[recording.id]?.agreedAt ?? null,
+      sections,
+      acknowledged: acks[recording.id] ?? [],
+      cancelled: () => cancelUpload.current,
+      onProgress: (done, total) => {
+        setCloudUploads((current) => ({
+          ...current,
+          [recording.id]: { done, total, status: "uploading" },
+        }));
+      },
+      readFile: async (section) => {
+        const uri = recording.parts[section.sequence]?.fileUri;
+        if (!uri) throw new Error("That section has no audio file.");
+        const response = await fetch(uri);
+        return new Uint8Array(await response.arrayBuffer());
+      },
+    });
+    setAcks(await saveAcknowledgedSections(recording.id, outcome.acknowledged));
+    if (!outcome.ok) {
+      setCloudUploads((current) => {
+        const next = { ...current };
+        delete next[recording.id];
+        return next;
+      });
+      setError(outcome.reason);
+      return;
+    }
+    setCloudJobs((current) => ({ ...current, [recording.id]: outcome.job }));
+    setCloudUploads((current) => ({
+      ...current,
+      [recording.id]: { done: outcome.acknowledged.length, total: outcome.acknowledged.length, status: "complete" },
+    }));
+  }
+
+  async function removeUpload(recordingId: string) {
+    const job = cloudJobs[recordingId];
+    if (!job) return;
+    const removed = deleteJob(job);
+    const supabase = getSupabase();
+    const session = supabase ? await supabase.auth.getSession() : null;
+    const ownerId = session?.data.session?.user.id;
+    if (ownerId) {
+      const result = await deleteUploadedAudio({
+        ownerId,
+        paths: removed.paths.length > 0 ? removed.paths : storagePaths(job),
+        localRecordingId: recordingId,
+      });
+      if (!result.ok && result.reason) setError(result.reason);
+    }
+    setCloudJobs((current) => ({ ...current, [recordingId]: removed.job }));
+    setCloudUploads((current) => {
+      const next = { ...current };
+      delete next[recordingId];
+      return next;
+    });
+  }
+
+  async function signIn(email: string, password: string, create: boolean) {
+    const supabase = getSupabase();
+    if (!supabase) {
+      setError("Supabase is not configured on this phone.");
+      return;
+    }
+    const result = create
+      ? await supabase.auth.signUp({ email, password })
+      : await supabase.auth.signInWithPassword({ email, password });
+    if (result.error) {
+      setError(result.error.message);
+      return;
+    }
+    setAccountEmail(result.data.user?.email ?? email);
+    setError(null);
+    setRoute({ name: "library" });
+  }
+
   const openRecording =
     route.name === "recording" || route.name === "consent"
       ? recordings.find((recording) => recording.id === route.id)
@@ -541,7 +681,22 @@ export function RecorderScreen() {
         </Pressable>
       </View>
     );
-    if (route.name === "sample" && sampleDraft) {
+    if (route.name === "account") {
+      screen = (
+        <AccountScreen
+          configured={supabaseConfigured()}
+          email={accountEmail}
+          onBack={() => setRoute({ name: "library" })}
+          onSignIn={(email, password) => void signIn(email, password, false)}
+          onCreateAccount={(email, password) => void signIn(email, password, true)}
+          onSignOut={() => {
+            void getSupabase()?.auth.signOut();
+            setAccountEmail(null);
+          }}
+          error={error}
+        />
+      );
+    } else if (route.name === "sample" && sampleDraft) {
       screen = (
         <SampleNotesScreen
           draft={sampleDraft}
@@ -601,6 +756,14 @@ export function RecorderScreen() {
               : null
           }
           error={error}
+          cloudLabel={cloudFor(openRecording.id).label}
+          cloudDetail={cloudFor(openRecording.id).detail}
+          onSignIn={() => setRoute({ name: "account" })}
+          onUpload={() => void beginUpload(openRecording)}
+          onCancelCloud={() => {
+            cancelUpload.current = true;
+          }}
+          onDeleteUpload={() => void removeUpload(openRecording.id)}
         />
       );
     }
@@ -642,7 +805,12 @@ export function RecorderScreen() {
     <SafeAreaView style={styles.safe}>
       <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
         <Text style={styles.mark}>MemoAI</Text>
-        <Text style={styles.kicker}>On this phone. No account.</Text>
+        <Text style={styles.kicker}>
+          {accountEmail ? `On this phone. ${accountEmail}` : "On this phone. No account."}
+        </Text>
+        <Pressable accessibilityRole="button" onPress={() => setRoute({ name: "account" })}>
+          <Text style={styles.backLink}>{accountEmail ? "Account" : "Sign in for notes"}</Text>
+        </Pressable>
         <View style={styles.timerBlock}>
           <Text style={styles.timer}>{formatDuration(timerMs)}</Text>
           <View style={styles.statusRow}>
@@ -715,6 +883,9 @@ export function RecorderScreen() {
                   )}
                   <Text style={styles.notesStatus}>
                     {recordingNotesLabel(notesPhase(recording))}
+                    {cloudJobs[recording.id] || cloudUploads[recording.id]
+                      ? ` · ${cloudFor(recording.id).label}`
+                      : ""}
                   </Text>
                   <Text style={styles.rowState}>
                     {libraryState(recording, visible, sessionId)}
